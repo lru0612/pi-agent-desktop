@@ -6,10 +6,12 @@
  * JSON line on stdout:
  *
  *   probe                    -> { ok, platform, node, home, versions, running }
- *   start <version> [--replace]
+ *   start <version> [--replace | --replace-if-idle]
  *                            -> { ok, port, pid, version, password, reused, info }
+ *                               or { ok:false, error:"other_version_busy", running, busySessionIds }
  *   stop                     -> { ok, stopped }
  *   logs [lines]             -> { ok, file, text }
+ *   prune <keep>...          -> { ok, removed }   (never removes the running version)
  *
  * Installing a version is a separate step: the local side streams the server
  * tarball into `ssh <host> sh -s -- ...` with INSTALL_COMMAND (below).
@@ -97,10 +99,10 @@ function freePort() {
     });
   });
 }
-function getInfo(port, password) {
+function getJson(port, password, urlPath) {
   return new Promise((resolve) => {
     const req = http.get({
-      host: "127.0.0.1", port, path: "/api/remote-info", timeout: 3000, agent: false,
+      host: "127.0.0.1", port, path: urlPath, timeout: 3000, agent: false,
       headers: { Authorization: "Basic " + Buffer.from("pi:" + password).toString("base64") },
     }, (res) => {
       let body = "";
@@ -108,12 +110,16 @@ function getInfo(port, password) {
       res.on("data", (chunk) => { body += chunk; });
       res.on("end", () => {
         if (res.statusCode !== 200) return resolve({ status: res.statusCode });
-        try { resolve({ status: 200, info: JSON.parse(body) }); } catch { resolve({ status: -1 }); }
+        try { resolve({ status: 200, json: JSON.parse(body) }); } catch { resolve({ status: -1 }); }
       });
     });
     req.on("timeout", () => req.destroy());
     req.on("error", () => resolve(null));
   });
+}
+async function getInfo(port, password) {
+  const result = await getJson(port, password, "/api/remote-info");
+  return result && result.status === 200 ? { status: 200, info: result.json } : result;
 }
 function tail(file, lines) {
   try {
@@ -130,7 +136,7 @@ async function stop() {
   return true;
 }
 
-async function start(version, replace) {
+async function start(version, mode) {
   if (!version) return out({ ok: false, error: "usage", message: "start <version>" });
   const dir = path.join(VERSIONS, version);
   if (!fs.existsSync(path.join(dir, "headless-launcher.cjs"))) {
@@ -144,8 +150,16 @@ async function start(version, replace) {
       if (probe && probe.status === 200) {
         return out({ ok: true, reused: true, port: running.port, pid: running.pid, version, password, info: probe.info });
       }
-    } else if (!replace) {
+    } else if (mode === "never") {
       return out({ ok: false, error: "other_version_running", running });
+    } else if (mode === "if-idle") {
+      // Replacing the server kills its agent runs; only do it when none is active.
+      const busy = await getJson(running.port, password, "/api/agent/running");
+      const ids = busy && busy.status === 200 && Array.isArray(busy.json.runningSessionIds)
+        ? busy.json.runningSessionIds : null;
+      if (ids === null || ids.length > 0) {
+        return out({ ok: false, error: "other_version_busy", running, busySessionIds: ids || [] });
+      }
     }
     await stop();
   }
@@ -194,11 +208,26 @@ async function main() {
       running: runningState(),
     });
   }
-  if (action === "start") return start(args[0], args.includes("--replace"));
+  if (action === "start") {
+    const mode = args.includes("--replace") ? "force" : args.includes("--replace-if-idle") ? "if-idle" : "never";
+    return start(args[0], mode);
+  }
   if (action === "stop") return out({ ok: true, stopped: await stop() });
   if (action === "logs") {
     const lines = Number.parseInt(args[0] || "200", 10) || 200;
     return out({ ok: true, file: LOG_FILE, text: tail(LOG_FILE, lines) });
+  }
+  if (action === "prune") {
+    const keep = new Set(args);
+    const running = runningState();
+    if (running) keep.add(running.version);
+    const removed = [];
+    for (const name of installedVersions()) {
+      if (keep.has(name)) continue;
+      fs.rmSync(path.join(VERSIONS, name), { recursive: true, force: true });
+      removed.push(name);
+    }
+    return out({ ok: true, removed });
   }
   return out({ ok: false, error: "usage", message: "unknown action " + action });
 }
