@@ -1,4 +1,4 @@
-import { access, chmod, copyFile, cp, mkdir, readdir, rm } from "node:fs/promises";
+import { access, chmod, copyFile, cp, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
@@ -163,6 +163,21 @@ async function assembleServer() {
   await copyFile(
     join(rootDir, "desktop", "server-launcher.cjs"),
     join(serverResourcesDir, "desktop-server.cjs"),
+  );
+
+  // Remote hosts (fork-owned): the same server tree runs headless on a remote
+  // machine through this launcher; the version stamp lets the bootstrap script
+  // and the launcher's state file report which build is installed.
+  await copyFile(
+    join(rootDir, "desktop", "headless-launcher.cjs"),
+    join(serverResourcesDir, "headless-launcher.cjs"),
+  );
+  const desktopPackage = JSON.parse(
+    await readFile(join(rootDir, "src-tauri", "pi-agent-desktop-package.json"), "utf8"),
+  );
+  await writeFile(
+    join(serverResourcesDir, "pi-remote-version.json"),
+    `${JSON.stringify({ appVersion: desktopPackage.version })}\n`,
   );
 
   const staticSource = join(desktopBuildDir, "static");
