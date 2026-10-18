@@ -240,12 +240,12 @@ function DownloadLink({ filePath, sourceSessionId }: { filePath: string; sourceS
         void (async () => {
           setBusy(true);
           try {
-            const { saveLocalFileAs } = await import("@/lib/desktop-native");
-            await saveLocalFileAs(
-              filePath,
-              getFileName(filePath),
-              getFileApiUrl(filePath, "download", sourceSessionId),
-            );
+            const { saveLocalFileAs, downloadUrlAsFile } = await import("@/lib/desktop-native");
+            const downloadUrl = getFileApiUrl(filePath, "download", sourceSessionId);
+            // Fork: a remote file is fetched through the proxy; the local server
+            // must not copy whatever sits at the same path on this machine.
+            if (!canUseNativeFileActions(filePath)) await downloadUrlAsFile(downloadUrl, getFileName(filePath));
+            else await saveLocalFileAs(filePath, getFileName(filePath), downloadUrl);
           } catch (error) {
             console.error("Failed to save file:", error);
           } finally {

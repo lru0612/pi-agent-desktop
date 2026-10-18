@@ -35,7 +35,9 @@ export function RemoteHostBanner() {
       ? t("remote.banner.connecting", { host: label, phase: hostProblemText(host, t) })
       : busy
         ? t("remote.banner.busy", { host: label, count: host.busySessionIds?.length ?? 0 })
-        : t("remote.banner.offline", { host: label, reason: hostProblemText(host, t) });
+        : host.error
+          ? t("remote.banner.offline", { host: label, reason: hostProblemText(host, t) })
+          : t("remote.banner.disconnected", { host: label });
   return (
     <div className={`remote-host-banner is-${tone}`} role="status">
       <span className={`sidebar-project-remote-globe is-${tone}`} aria-hidden="true"><GlobeIcon size={13} /></span>

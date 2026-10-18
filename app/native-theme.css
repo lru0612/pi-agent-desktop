@@ -7969,6 +7969,7 @@ html.dark {
   display: flex;
   flex-shrink: 0;
   align-items: center;
+  justify-content: center;
   gap: 8px;
   min-height: 30px;
   padding: 4px 12px;
@@ -7983,7 +7984,7 @@ html.dark {
 }
 
 .remote-host-banner-text {
-  flex: 1;
+  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
