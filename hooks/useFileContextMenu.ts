@@ -17,6 +17,7 @@ import {
 import { getDesktopPlatform } from "@/lib/desktop-window";
 import { appListCacheKey, buildFileMenuEntries, revealLabelKey } from "@/lib/file-context-menu";
 import { encodeFilePathForApi } from "@/lib/file-paths";
+import { canUseNativeFileActions } from "@/lib/remote/client-store";
 
 const APP_LIST_TTL_MS = 5 * 60_000;
 /** Past this the menu opens without the app list rather than keep the user waiting. */
@@ -88,7 +89,7 @@ export function useFileContextMenu(
   const { t } = useI18n();
 
   return useCallback((event, { filePath, page, verify }) => {
-    if (!isTauriDesktop()) return;
+    if (!isTauriDesktop() || !canUseNativeFileActions(filePath)) return;
     // Claim the right-click now: the checks below are async, and the document
     // fallback in useNativeContextMenu only respects a prevented event.
     event.preventDefault();

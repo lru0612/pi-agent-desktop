@@ -1,6 +1,7 @@
 # 远程主机（SSH）设计文档
 
-> 状态：草案 · 分支 `feat/remote-hosts` · 基于 `abcwyc/pi-agent-desktop@10cc27f`（0.7.3）
+> 状态：已实现（M0–M3），分支 `feat/remote-hosts` · 基于 `abcwyc/pi-agent-desktop@10cc27f`（0.7.3）
+> 使用说明见 [remote-hosts.zh-CN.md](remote-hosts.zh-CN.md)。实现与本文的差异：定时任务和全文搜索暂只显示本机；无界面服务端由桌面端直接上传本机打包的服务端目录，没有单独的发布包。
 
 ## 1. 目标
 

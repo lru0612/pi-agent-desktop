@@ -16,6 +16,7 @@ import type { FileIndexEntry } from "@/lib/file-fuzzy";
 import { buildSearchTree, type SearchTreeNode } from "@/lib/search-tree";
 import { useI18n } from "@/hooks/useI18n";
 import { isImeComposing } from "@/lib/ime";
+import { routeApiUrl } from "@/lib/remote/client";
 type Translate = ReturnType<typeof useI18n>["t"];
 
 interface FileEntry {
@@ -466,7 +467,7 @@ export function TreeNode({
         )}
         {hovered && !node.isDir && (
           <a
-            href={`/api/files/${encodeFilePathForApi(node.fullPath)}?type=download`}
+            href={routeApiUrl(`/api/files/${encodeFilePathForApi(node.fullPath)}?type=download`)}
             download
             onClick={(e) => e.stopPropagation()}
             title={t("files.download")}

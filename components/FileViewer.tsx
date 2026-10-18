@@ -26,6 +26,8 @@ import { parseUnifiedPatch } from "@/lib/patch";
 import type { GitFileDiffResponse } from "@/lib/git-types";
 import { getFileIcon } from "./FileIcons";
 import { useI18n } from "@/hooks/useI18n";
+import { routeApiUrl } from "@/lib/remote/client";
+import { canUseNativeFileActions } from "@/lib/remote/client-store";
 import {
   resolveInitialFileDisplayMode,
   type FileViewerDisplayMode as DisplayMode,
@@ -221,7 +223,7 @@ function getFileApiUrl(
   for (const [key, value] of Object.entries(params)) {
     if (value !== undefined) searchParams.set(key, String(value));
   }
-  return `/api/files/${encoded}?${searchParams.toString()}`;
+  return routeApiUrl(`/api/files/${encoded}?${searchParams.toString()}`);
 }
 
 function DownloadLink({ filePath, sourceSessionId }: { filePath: string; sourceSessionId?: string | null }) {
@@ -268,7 +270,7 @@ function DesktopPathActions({ filePath }: { filePath: string }) {
       setDesktop(isTauriDesktop());
     });
   }, []);
-  if (!desktop) return null;
+  if (!desktop || !canUseNativeFileActions(filePath)) return null;
 
   return (
     <>

@@ -38,6 +38,10 @@ import { ScheduledSidebarRow } from "./scheduled/ScheduledSidebarRow";
 import { isScheduledRunSession } from "@/hooks/useScheduledTasks";
 import { prefetchSessionData } from "@/lib/session-data-cache";
 import { isImeComposing } from "@/lib/ime";
+import { RemoteProjectBadge } from "@/components/remote/RemoteProjectBadge";
+import { openAddProjectMenu } from "@/components/remote/RemoteIntegration";
+import { canUseNativeFileActions, remoteClientStore } from "@/lib/remote/client-store";
+import { useRemoteClientState } from "@/components/remote/useRemote";
 
 function sessionListUrl(summary: boolean, force: boolean): string {
   if (summary) return "/api/sessions?summary=1";
@@ -175,6 +179,7 @@ function buildSessionTree(sessions: SessionInfo[]): SessionTreeNode[] {
 
 export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onProjectsChange, onBackgroundTaskDone, onRunningSessionIdsChange, onSessionsChange, headerControls, onOpenTerminal, onOpenScheduled, scheduledOpen = false }: Props) {
   const { t } = useI18n();
+  const remoteCurrentHost = useRemoteClientState().currentHost;
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
   // Tracked in a ref only: the version is compared against the polled value to
   // decide whether the list needs reloading, and no render reads it.
@@ -880,7 +885,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     onNewSession?.(tempId, cwd);
   }, [selectedCwd, archivedProjectRoots, onNewSession, projectRootFor]);
 
-  const handleAddProject = useCallback(async () => {
+  const addLocalProject = useCallback(async () => {
     if (!isTauriDesktop()) {
       setProjectPickerOpen(true);
       return;
@@ -893,6 +898,12 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       console.error("Failed to select project folder:", error);
     }
   }, [selectedCwd, homeDir, activateProject]);
+
+  // Fork: "+" first asks where the folder lives (this computer / SSH host).
+  const handleAddProject = useCallback(async (event?: React.MouseEvent<HTMLElement>) => {
+    if (!event) return addLocalProject();
+    await openAddProjectMenu(event.currentTarget, t, { onLocal: () => void addLocalProject(), onPicked: activateProject });
+  }, [addLocalProject, activateProject, t]);
 
   const archiveProject = useCallback((projectRoot: string) => {
     setArchivedProjectRoots((prev) => {
@@ -1016,7 +1027,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
 
   const renderProjectGroup = (group: ReturnType<typeof groupByProject>[number]) => {
     const isCollapsed = !trimmedSessionQuery && collapsedProjects.has(group.projectRoot);
-    const isActive = group.projectRoot === projectRootFor(selectedCwd);
+    // Fork: with SSH hosts the same path can be a project on two machines.
+    const isActive = group.projectRoot === projectRootFor(selectedCwd)
+      && (group.host ?? null) === remoteCurrentHost;
     const runningCount = group.runningIds.size;
     const unreadCount = group.unreadIds.size;
     const groupTree = buildSessionTree(group.sessions);
@@ -1047,14 +1060,17 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         else next.add(group.projectRoot);
         return next;
       });
-      if (!isActive) setSelectedCwd(group.projectRoot);
+      if (!isActive) {
+        remoteClientStore.pinProjectHost(group.projectRoot, group.host ?? null);
+        setSelectedCwd(group.projectRoot);
+      }
     };
 
     const isMenuOpen = projectMenu?.root === group.projectRoot;
     const rowTitle = branchSubtitle ? `${group.projectRoot} · ${branchSubtitle}` : group.projectRoot;
 
     return (
-      <div key={group.projectRoot} className={`sidebar-project-tree-group${isCollapsed ? " is-collapsed" : ""}${isActive ? " is-active" : ""}`}>
+      <div key={group.host ? `${group.host}:${group.projectRoot}` : group.projectRoot} className={`sidebar-project-tree-group${isCollapsed ? " is-collapsed" : ""}${isActive ? " is-active" : ""}`}>
         <div className={`sidebar-project-tree-row${isMenuOpen ? " is-menu-open" : ""}`}>
           <button
             type="button"
@@ -1081,6 +1097,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             <span className="sidebar-project-tree-name">
               {projectDisplayNames.get(group.projectRoot) ?? group.displayName}
             </span>
+            <RemoteProjectBadge projectRoot={group.projectRoot} sessions={group.sessions} />
             {/* A folded project hides its rows, so the count (and any running
                 or unread chips) must stay readable on the header itself. */}
             {isCollapsed && (
@@ -1303,7 +1320,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                   <button
                     type="button"
                     className="sidebar-empty-add"
-                    onClick={() => void handleAddProject()}
+                    onClick={(event) => void handleAddProject(event)}
                     title={t("sidebar.addProject")}
                     aria-label={t("sidebar.addProject")}
                   >
@@ -1373,7 +1390,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
               <button
                 type="button"
                 className="sidebar-project-tree-add"
-                onClick={() => void handleAddProject()}
+                onClick={(event) => void handleAddProject(event)}
                 title={t("sidebar.addProject")}
                 aria-label={t("sidebar.addProject")}
               >
@@ -1403,7 +1420,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
           worktreeError={worktreeActions.error}
           confirmRemove={worktreeActions.confirmRemove}
           newBranch={worktreeActions.newBranch}
-          canReveal={isTauriDesktop() || fileManagerAvailability?.supported === true}
+          canReveal={(isTauriDesktop() || fileManagerAvailability?.supported === true) && canUseNativeFileActions(projectMenu.root)}
           revealLabel={revealProjectLabel}
           projectRevealError={projectRevealError}
           t={t}

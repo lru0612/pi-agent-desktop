@@ -14,6 +14,7 @@ import { htmlPreviewKind } from "@/lib/html-preview";
 import { ArtifactCard } from "./ArtifactCard";
 import { ARTIFACT_FENCE_LANG, decodeArtifactFence, encodeArtifactsForMarkdown } from "@/lib/artifacts";
 import { handleExternalLinkClick } from "@/lib/desktop-native";
+import { routeApiUrl } from "@/lib/remote/client";
 
 const MarkdownLinkContext = createContext(false);
 
@@ -40,7 +41,7 @@ function MarkdownImage({
   const href = typeof src === "string" ? src : undefined;
   const filePath = href ? resolveLocalFileHref(href, cwd) : null;
   const imageSrc = filePath
-    ? `/api/files/${encodeFilePathForApi(filePath)}?type=read`
+    ? routeApiUrl(`/api/files/${encodeFilePathForApi(filePath)}?type=read`)
     : href;
   // Dynamic local paths are served directly by the file API.
   // eslint-disable-next-line @next/next/no-img-element

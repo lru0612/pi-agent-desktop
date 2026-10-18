@@ -4,12 +4,12 @@
  */
 import { spawnSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
-import { userHome } from "@/lib/user-home";
+import { userHome } from "../user-home.ts";
 import { basename, dirname, isAbsolute, join } from "node:path";
 
-import { BOOTSTRAP_SCRIPT } from "./bootstrap-script";
-import { findServerBundleDir, readServerBundle } from "./bundle";
-import { runSsh } from "./ssh";
+import { BOOTSTRAP_SCRIPT } from "./bootstrap-script.ts";
+import { findServerBundleDir, readServerBundle } from "./bundle.ts";
+import { runSsh } from "./ssh.ts";
 
 export interface SshConfigHost {
   alias: string;
@@ -38,7 +38,7 @@ export function parseSshConfig(text: string, include?: (pattern: string) => stri
   for (const rawLine of text.split(/\r?\n/)) {
     const line = rawLine.replace(/#.*/, "").trim();
     if (!line) continue;
-    const match = /^(\S+)\s*=?\s*(.*)$/.exec(line);
+    const match = /^([^\s=]+)\s*(?:=\s*|\s+)(.*)$/.exec(line);
     if (!match) continue;
     const key = match[1]!.toLowerCase();
     const value = match[2]!.trim();

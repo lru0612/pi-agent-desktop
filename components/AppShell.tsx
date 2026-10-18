@@ -1,5 +1,7 @@
 "use client";
 
+// Fork: must run before any component fetches (remote-host request router).
+import "@/lib/remote/install-client";
 import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo } from "react";
 import { createPortal } from "react-dom";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -100,6 +102,10 @@ import type { FileViewerState } from "@/lib/file-viewer-state";
 import type { ToolEntry } from "@/lib/tool-presets";
 import { getSessionFamily } from "@/lib/session-family";
 import { getLastSettingsSection, type SettingsSection } from "@/lib/settings-navigation";
+import { RemoteHostBanner } from "@/components/remote/RemoteIntegration";
+import { RemoteUiHost } from "@/components/remote/RemoteUiHost";
+import { useRemoteHostRecovered, useRemoteWorkspace } from "@/components/remote/useRemote";
+import { routeApiUrl } from "@/lib/remote/client";
 
 type SessionCopyField = "file" | "id" | "projectDir" | "gitBranch" | "gitWorktree";
 type AutoNameStatus =
@@ -1489,7 +1495,8 @@ export function AppShell() {
     // Absolute URL so Tauri's open_external_url (http/https only) can hand the
     // page to the system browser for inline viewing — not a save dialog.
     const exportUrl = new URL(
-      `/api/sessions/${encodeURIComponent(selectedSession.id)}/export?inline=1`,
+      // Fork: a remote session's export is served by its host.
+      routeApiUrl(`/api/sessions/${encodeURIComponent(selectedSession.id)}/export?inline=1`),
       window.location.origin,
     ).href;
     void import("@/lib/desktop-native").then(({ openExternal }) => {
@@ -1509,6 +1516,7 @@ export function AppShell() {
   }, [newSessionDraftKey]);
   const showChat = selectedSession !== null || effectiveNewSessionCwd !== null;
   const projectTrustCwd = selectedSession?.cwd ?? effectiveNewSessionCwd;
+  useRemoteWorkspace(selectedSession?.id, projectTrustCwd);
   // While restoring initial session from URL, don't show the placeholder
   const showPlaceholder = initialSessionRestored && !showChat;
 
@@ -1528,6 +1536,12 @@ export function AppShell() {
   });
 
   const { workspaceAvailability, unavailableWorkspace, recheckWorkspace } = useWorkspaceAvailability(projectTrustCwd, setModelsRefreshKey);
+  // Fork: reload the chat and models once the workspace's SSH host is back.
+  useRemoteHostRecovered(useCallback(() => {
+    setModelsRefreshKey((key) => key + 1);
+    setSessionKey((key) => key + 1);
+    recheckWorkspace();
+  }, [recheckWorkspace]));
 
   useEffect(() => {
     setProjectTrust(null);
@@ -1874,6 +1888,7 @@ export function AppShell() {
           </button>
         </div>
       )}
+      <RemoteHostBanner />
       <div style={{ display: "flex", flex: 1, minHeight: 0, overflow: "hidden" }}>
       {/* Mobile overlay backdrop */}
       <div
@@ -3013,6 +3028,7 @@ export function AppShell() {
     )}
     <UpdateReminder onOpenSettings={() => setSettingsSection("general")} />
     <DomContextMenuHost />
+    <RemoteUiHost />
     </div>
     </>
   );

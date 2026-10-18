@@ -14,6 +14,8 @@ export function resultImageFileName(mediaType: string | undefined, index: number
   return `image-${index + 1}.${(mediaType && IMAGE_EXTENSIONS[mediaType.toLowerCase()]) ?? "png"}`;
 }
 
+import { routeApiUrl } from "@/lib/remote/client";
+
 const sourceCache = new WeakMap<object, { payload: string | undefined; type: string | undefined; mediaType: string | undefined; src: string }>();
 
 /**
@@ -35,7 +37,7 @@ export function imageSource(img: { source?: { type?: string; media_type?: string
   const src = img.source
     ? img.source.type === "base64"
       ? `data:${mediaType};base64,${payload}`
-      : payload ?? ""
+      : routeApiUrl(payload ?? "") // fork: remote sessions serve their own images
     : payload
       ? `data:${mediaType};base64,${payload}`
       : "";

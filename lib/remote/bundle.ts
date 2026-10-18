@@ -10,7 +10,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
-import { isSafeVersion } from "./bootstrap-script";
+import { isSafeVersion } from "./bootstrap-script.ts";
 
 export interface ServerBundle {
   dir: string;

@@ -9,7 +9,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import type { Readable } from "node:stream";
 
-import { parseSshTarget } from "./hosts-store";
+import { parseSshTarget } from "./hosts-store.ts";
 
 /** Options shared by every ssh invocation. */
 export function sshCommonOptions(): string[] {

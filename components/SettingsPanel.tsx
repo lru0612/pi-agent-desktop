@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { useI18n } from "@/hooks/useI18n";
 import { useTheme } from "@/hooks/useTheme";
 import { useDiffViewMode } from "@/hooks/useDiffViewMode";
@@ -40,6 +40,7 @@ import { DesktopAppSection } from "./desktop";
 import { McpConfig } from "./McpConfig";
 import { ConfigButton, ConfigSwitch } from "./SettingsUi";
 import { ArtifactsSettingRow } from "./ArtifactsSettingRow";
+import { useRemoteConfigScope } from "@/components/remote/RemoteIntegration";
 
 interface Props {
   cwd: string | null;
@@ -457,7 +458,7 @@ export const SETTINGS_SECTION_ITEMS: { id: SettingsSection; labelKey: string; re
 ];
 
 export function SettingsPanel({
-  cwd,
+  cwd: workspaceCwd,
   sessionId,
   initialSection,
   onClose,
@@ -471,6 +472,10 @@ export function SettingsPanel({
   onProjectTrustChanged,
 }: Props) {
   const { t } = useI18n();
+  // Fork: which backend's configuration the sections show (local / SSH host).
+  // The project only applies when it lives on that backend.
+  const remoteScope = useRemoteConfigScope(workspaceCwd);
+  const cwd = remoteScope.cwdApplies ? workspaceCwd : null;
   const [section, setSection] = useState<SettingsSection>(initialSection);
   const [mountedSections, setMountedSections] = useState<ReadonlySet<SettingsSection>>(
     () => new Set([section]),
@@ -542,6 +547,7 @@ export function SettingsPanel({
       <div className="settings-dialog-surface">
         <div className="settings-dialog-header">
           <strong className="settings-dialog-title">{t("settings.title")}</strong>
+          {remoteScope.element}
           <select
             aria-label={t("settings.sectionPicker")}
             value={section}
@@ -578,6 +584,8 @@ export function SettingsPanel({
         </div>
 
         <main className="settings-dialog-main">
+          {/* Fork: switching the settings scope remounts every section. */}
+          <Fragment key={remoteScope.scopeKey}>
           {sectionHost("general", <GeneralSettings sessionId={sessionId} onSessionReloaded={onSessionReloaded} quoteSelectionEnabled={quoteSelectionEnabled} onQuoteSelectionChange={onQuoteSelectionChange} soundEnabled={soundEnabled} onSoundToggle={onSoundToggle} onBusyChange={setBusy} />)}
           {sectionHost("models", <ModelsConfig embedded cwd={cwd} onClose={onClose} onOpenMcp={() => activateSection("mcp")} />)}
           {/* Visited sections stay mounted, so the ones whose answer depends on trust take the page's
@@ -587,6 +595,7 @@ export function SettingsPanel({
           {cwd && sectionHost("plugins", <PluginsConfig embedded key={cwd} cwd={cwd} sessionId={sessionId} trust={projectTrust} onClose={onClose} onReloaded={onSessionReloaded} />)}
           {/* No project needed: the global mcp.json is listed alone, and a project adds its group. */}
           {sectionHost("mcp", <McpConfig embedded key={cwd ?? ""} cwd={cwd} trust={projectTrust} onTrustProject={onOpenTrustDialog} onProjectTrustChanged={onProjectTrustChanged} onClose={onClose} />)}
+          </Fragment>
         </main>
       </div>
     </div>

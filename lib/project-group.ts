@@ -20,6 +20,8 @@ export interface ProjectGroup {
   runningIds: Set<string>;
   /** Branches observed in this group (cwd's `worktreeBranch`), deduped, sorted. */
   branches: string[];
+  /** Fork: remote host owning the project (absent for local projects). */
+  host?: string;
 }
 
 function basenameOf(path: string): string {
@@ -51,17 +53,21 @@ export function groupByProject(
   const groups = new Map<string, ProjectGroup>();
 
   for (const session of sessions) {
-    const key = session.projectRoot || session.cwd;
+    const root = session.projectRoot || session.cwd;
+    // Fork: the same path on two machines is two projects.
+    const host = (session as SessionInfo & { host?: string }).host;
+    const key = host ? `${host}\u0000${root}` : root;
     let group = groups.get(key);
     if (!group) {
       group = {
-        projectRoot: key,
-        displayName: basenameOf(key),
+        projectRoot: root,
+        displayName: basenameOf(root),
         sessions: [],
         latestModified: session.modified,
         unreadIds: new Set<string>(),
         runningIds: new Set<string>(),
         branches: [],
+        ...(host ? { host } : {}),
       };
       groups.set(key, group);
     }

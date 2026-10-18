@@ -128,10 +128,10 @@ export function splitSshTarget(input: string): string[] {
 export function parseSshTarget(input: string): string[] {
   const parts = splitSshTarget(input.trim());
   if (parts.length === 0) throw new Error("SSH target is empty");
-  if (!parts.some((part) => !part.startsWith("-"))) throw new Error("SSH target has no host");
+  const hostIndex = hostArgIndex(parts);
+  if (hostIndex < 0) throw new Error("SSH target has no host");
   // Remote commands are added by us; a target that already carries one would
   // run before the bootstrap script. Disallow anything after the host.
-  const hostIndex = hostArgIndex(parts);
   if (hostIndex !== parts.length - 1) {
     throw new Error("put SSH options before the host (e.g. \"-p 2222 user@host\")");
   }
