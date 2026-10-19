@@ -2,8 +2,8 @@
 
 // Headless entry point for running the packaged pi-web server on a remote
 // machine (reached by the desktop app through an SSH tunnel). Unlike
-// desktop-server.cjs it has no parent-process watchdog — it is started with
-// setsid/nohup and must outlive the SSH session that launched it.
+// desktop-server.cjs it has no parent-process watchdog. The bootstrap detaches
+// it; it must outlive the SSH session that launched it.
 //
 // Environment:
 //   PORT                    port to listen on (required)
@@ -63,7 +63,14 @@ const passwordFile = process.env.PI_WEB_PASSWORD_FILE;
 if (passwordFile) {
   let password;
   try {
-    password = fs.readFileSync(passwordFile, "utf8").trim();
+    const fd = fs.openSync(passwordFile, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    try {
+      if (!fs.fstatSync(fd).isFile()) throw new Error("password file is not a regular file");
+      fs.fchmodSync(fd, 0o600);
+      password = fs.readFileSync(fd, "utf8").trim();
+    } finally {
+      fs.closeSync(fd);
+    }
   } catch (error) {
     fail(`cannot read PI_WEB_PASSWORD_FILE ${passwordFile}: ${error.message}`);
   }
@@ -81,17 +88,8 @@ if (!process.env.PI_WEB_PASSWORD) {
   log("warning: no password configured; any local user on this machine can reach the server port");
 }
 
-// Overwrite-install leftovers: see desktop-server.cjs (#72).
-try {
-  const scopeDir = path.join(__dirname, "node_modules", "@earendil-works");
-  for (const pkg of fs.readdirSync(scopeDir, { withFileTypes: true })) {
-    if (!pkg.isDirectory()) continue;
-    const nested = path.join(scopeDir, pkg.name, "node_modules", "@earendil-works");
-    if (fs.existsSync(nested)) fs.rmSync(nested, { recursive: true, force: true });
-  }
-} catch (error) {
-  log(`stale-dependency cleanup failed: ${error.message}`);
-}
+// Unlike the mutable Windows desktop install, remote bundles are immutable.
+// Dependency cleanup belongs in packaging, not in a daemon sharing this tree.
 
 const stateFile = process.env.PI_REMOTE_STATE_FILE;
 if (stateFile) {
@@ -112,12 +110,35 @@ if (stateFile) {
     startedAt: new Date().toISOString(),
   };
   try {
-    fs.mkdirSync(path.dirname(stateFile), { recursive: true });
-    fs.writeFileSync(stateFile, `${JSON.stringify(state)}\n`, { mode: 0o600 });
+    const stateDir = path.dirname(stateFile);
+    fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+    if (!fs.lstatSync(stateDir).isDirectory()) throw new Error("state directory is not a private directory");
+    fs.chmodSync(stateDir, 0o700);
+    const tmp = `${stateFile}.${process.pid}.tmp`;
+    try {
+      fs.writeFileSync(tmp, `${JSON.stringify(state)}\n`, { mode: 0o600, flag: "wx" });
+      fs.renameSync(tmp, stateFile);
+    } finally {
+      fs.rmSync(tmp, { force: true });
+    }
   } catch (error) {
-    log(`cannot write state file ${stateFile}: ${error.message}`);
+    fail(`cannot write state file ${stateFile}: ${error.message}`);
+  }
+  // Registry of every server this home has running (one file per pid): the
+  // bootstrap uses it to find and stop idle servers state.json no longer names.
+  const registryFile = path.join(path.dirname(stateFile), "servers", `${process.pid}.json`);
+  try {
+    fs.mkdirSync(path.dirname(registryFile), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(registryFile, `${JSON.stringify(state)}\n`, { mode: 0o600 });
+  } catch (error) {
+    log(`warning: cannot write server registry entry ${registryFile}: ${error.message}`);
   }
   const clear = () => {
+    try {
+      fs.rmSync(registryFile, { force: true });
+    } catch {
+      // Best effort: the bootstrap drops entries whose pid is gone.
+    }
     try {
       const current = JSON.parse(fs.readFileSync(stateFile, "utf8"));
       if (current.pid === process.pid) fs.rmSync(stateFile, { force: true });
@@ -128,8 +149,9 @@ if (stateFile) {
   process.on("exit", clear);
 }
 
-// SIGINT/SIGTERM are left to Next's standalone server and
-// instrumentation-node.ts (graceful SSE shutdown). nohup already ignores SIGHUP.
+// Detaching does not itself ignore SIGHUP. A lost SSH client is not a request
+// to terminate agents. SIGINT/SIGTERM remain owned by the server's shutdown path.
+process.on("SIGHUP", () => {});
 
 log(`starting pi-web on ${process.env.HOSTNAME}:${port} (node ${process.version}, pid ${process.pid})`);
 

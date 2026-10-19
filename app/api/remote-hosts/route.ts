@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
 
+import { guardRemoteHostMutation } from "@/lib/remote/api-guard";
 import { findServerBundleDir, readServerBundle } from "@/lib/remote/bundle";
 import { getRemoteHostManager } from "@/lib/remote/host-manager";
-import { parseSshTarget } from "@/lib/remote/hosts-store";
-import { hasJsonContentType } from "@/lib/request-security";
+import { normalizeSshTarget, parseSshTarget } from "@/lib/remote/hosts-store";
 
 export const dynamic = "force-dynamic";
 
@@ -26,19 +26,22 @@ export async function GET() {
 // POST /api/remote-hosts  body: { ssh: string, label?: string }
 // Adds a host and starts connecting; poll GET for progress.
 export async function POST(req: Request) {
-  if (!hasJsonContentType(req)) {
-    return NextResponse.json({ error: "Content-Type must be application/json" }, { status: 415 });
-  }
+  const refused = guardRemoteHostMutation(req, { json: "required" });
+  if (refused) return refused;
   let body: { ssh?: unknown; label?: unknown };
   try {
     body = await req.json() as { ssh?: unknown; label?: unknown };
   } catch {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
-  const ssh = typeof body.ssh === "string" ? body.ssh.trim() : "";
+  const raw = typeof body.ssh === "string" ? body.ssh.trim() : "";
   const label = typeof body.label === "string" ? body.label.trim().slice(0, 64) : undefined;
-  if (!ssh) return NextResponse.json({ error: "SSH target is required" }, { status: 400 });
+  if (!raw) return NextResponse.json({ error: "SSH target is required" }, { status: 400 });
+  // Accept "user@host -p 2222" the way people type it; the manager stores the
+  // normalised "-p 2222 user@host" form, so validate that one.
+  let ssh: string;
   try {
+    ssh = normalizeSshTarget(raw);
     parseSshTarget(ssh);
   } catch (error) {
     return NextResponse.json({ error: (error as Error).message }, { status: 400 });

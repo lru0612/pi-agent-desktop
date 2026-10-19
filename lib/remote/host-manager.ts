@@ -17,6 +17,7 @@ import { EventEmitter } from "node:events";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { connect as netConnect, createServer } from "node:net";
 import { dirname, join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import * as undici from "undici";
@@ -51,10 +52,14 @@ const PERMANENT_ERRORS = new Set([
   "protocol_mismatch",
   "other_version_busy",
   "install_failed",
+  "login_rejected",
+  "server_identity_unknown",
 ]);
 
 const HEALTH_INTERVAL_MS = 30_000;
 const MAX_BACKOFF_MS = 60_000;
+/** Server versions installed more recently than this are never pruned. */
+const PRUNE_MIN_AGE_HOURS = 24;
 
 class HostConnectError extends Error {
   constructor(readonly code: string, message: string, readonly detail?: string, readonly extra?: Record<string, unknown>) {
@@ -75,6 +80,9 @@ interface HostRuntime {
   healthTimer: ReturnType<typeof setInterval> | null;
   healthFailures: number;
   connecting: Promise<void> | null;
+  controller: AbortController | null;
+  healthCheck: Promise<void> | null;
+  authRetryAfter: number;
   tunnel: ChildProcess | null;
   tunnelStderr: string;
   localPort: number | null;
@@ -110,22 +118,34 @@ function freePort(preferred?: number | null): Promise<number> {
   return tryListen(0);
 }
 
-function waitForPort(port: number, timeoutMs: number, isDead: () => boolean): Promise<void> {
-  const deadline = now() + timeoutMs;
+function waitForPort(port: number, timeoutMs: number, isDead: () => boolean, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
+    let socket: ReturnType<typeof netConnect> | undefined;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    let settled = false;
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      clearTimeout(retry);
+      signal.removeEventListener("abort", abort);
+      socket?.destroy();
+      if (error) reject(error);
+      else resolve();
+    };
+    const abort = () => finish(new Error("connection cancelled"));
+    const deadline = setTimeout(() => finish(new Error("timed out waiting for the tunnel")), timeoutMs);
     const attempt = () => {
-      if (isDead()) return reject(new Error("tunnel exited"));
-      const socket = netConnect({ host: "127.0.0.1", port });
-      socket.once("connect", () => {
-        socket.destroy();
-        resolve();
-      });
+      if (signal.aborted) return abort();
+      if (isDead()) return finish(new Error("tunnel exited"));
+      socket = netConnect({ host: "127.0.0.1", port });
+      socket.once("connect", () => finish());
       socket.once("error", () => {
-        socket.destroy();
-        if (now() > deadline) reject(new Error("timed out waiting for the tunnel"));
-        else setTimeout(attempt, 200);
+        socket?.destroy();
+        if (!settled) retry = setTimeout(attempt, 200);
       });
     };
+    signal.addEventListener("abort", abort, { once: true });
     attempt();
   });
 }
@@ -184,7 +204,7 @@ export class RemoteHostManager extends EventEmitter {
     super();
     this.setMaxListeners(100);
     process.once("exit", () => {
-      for (const runtime of this.hosts.values()) runtime.tunnel?.kill("SIGTERM");
+      for (const runtime of this.hosts.values()) this.teardown(runtime);
     });
   }
 
@@ -212,6 +232,9 @@ export class RemoteHostManager extends EventEmitter {
       healthTimer: null,
       healthFailures: 0,
       connecting: null,
+      controller: null,
+      healthCheck: null,
+      authRetryAfter: 0,
       tunnel: null,
       tunnelStderr: "",
       localPort: null,
@@ -270,7 +293,7 @@ export class RemoteHostManager extends EventEmitter {
       connectedAt: runtime.connectedAt,
       lastOnlineAt: runtime.lastOnlineAt,
       busySessionIds: runtime.busySessionIds,
-      runningSessionIds: runtime.status === "online" ? runtime.running.ids : [],
+      runningSessionIds: runtime.running.ids,
     };
   }
 
@@ -282,12 +305,11 @@ export class RemoteHostManager extends EventEmitter {
     return { baseUrl: `http://127.0.0.1:${runtime.localPort}`, cookie: runtime.cookie };
   }
 
-  /** Union of running session ids across online hosts. */
+  /** Last-known running ids, retained offline: losing transport is not completion. */
   remoteRunningIds(): { ids: string[]; suppressed: string[] } {
     const ids: string[] = [];
     const suppressed: string[] = [];
     for (const runtime of this.hosts.values()) {
-      if (runtime.status !== "online") continue;
       ids.push(...runtime.running.ids);
       suppressed.push(...runtime.running.suppressed);
     }
@@ -357,6 +379,8 @@ export class RemoteHostManager extends EventEmitter {
     this.persist();
     this.emitChange();
     if (options.stopRemote) {
+      // Do not race an explicit stop against this manager's cancelled start.
+      await runtime.connecting;
       await runSsh(runtime.config.ssh, "sh -s -- stop", { stdin: BOOTSTRAP_SCRIPT, timeoutMs: 30_000 }).catch(() => undefined);
     }
     return true;
@@ -367,6 +391,11 @@ export class RemoteHostManager extends EventEmitter {
     this.ensureStarted();
     const runtime = this.hosts.get(id);
     if (!runtime) return null;
+    // Repeated clicks coalesce; they must not tear down a live attempt or
+    // escalate its replacement policy to force midway through bootstrapping.
+    if (runtime.wanted && (runtime.status === "online" || (runtime.connecting && !runtime.controller?.signal.aborted))) {
+      return this.snapshot(runtime);
+    }
     runtime.wanted = true;
     runtime.attempt = 0;
     this.scheduleConnect(runtime, 0, options.replace);
@@ -402,20 +431,30 @@ export class RemoteHostManager extends EventEmitter {
     if (!runtime || runtime.status !== "online" || !runtime.localPort) {
       throw new HostConnectError("remote_offline", "host is not connected");
     }
-    const send = () => undici.request(`http://127.0.0.1:${runtime.localPort}${path}`, {
-      method: (init.method ?? "GET") as undici.Dispatcher.HttpMethod,
-      headers: {
-        ...(init.headers ?? {}),
-        ...(runtime.cookie ? { cookie: runtime.cookie } : {}),
-      },
-      body: init.body,
-      signal: init.signal,
-      dispatcher: this.dispatcher,
-    });
+    const signal = init.signal
+      ? AbortSignal.any([init.signal, runtime.controller!.signal])
+      : runtime.controller!.signal;
+    const baseUrl = `http://127.0.0.1:${runtime.localPort}`;
+    let cookie = runtime.cookie;
+    const send = () => {
+      signal.throwIfAborted();
+      cookie = runtime.cookie;
+      return undici.request(`${baseUrl}${path}`, {
+        method: (init.method ?? "GET") as undici.Dispatcher.HttpMethod,
+        headers: {
+          ...(init.headers ?? {}),
+          ...(cookie ? { cookie } : {}),
+        },
+        body: init.body,
+        signal,
+        dispatcher: this.dispatcher,
+      });
+    };
     let response = await send();
     if (response.statusCode === 401) {
       await response.body.dump();
-      await this.reauthenticate(runtime);
+      signal.throwIfAborted();
+      await this.reauthenticate(runtime, cookie);
       response = await send();
     }
     return response;
@@ -433,11 +472,17 @@ export class RemoteHostManager extends EventEmitter {
     return await response.body.json() as T;
   }
 
-  async reauthenticate(runtime: HostRuntime): Promise<void> {
+  private async reauthenticate(runtime: HostRuntime, rejectedCookie: string | null): Promise<void> {
+    runtime.controller?.signal.throwIfAborted();
+    if (runtime.cookie && runtime.cookie !== rejectedCookie) return;
     if (!runtime.relogin) {
-      runtime.relogin = this.login(runtime).finally(() => {
-        runtime.relogin = null;
+      if (now() < runtime.authRetryAfter) throw new HostConnectError("login_rejected", "Remote login is cooling down; reconnect to retry.");
+      // Bound repeated requests even if login succeeds but its cookie is rejected.
+      runtime.authRetryAfter = now() + MAX_BACKOFF_MS;
+      const login = this.login(runtime).finally(() => {
+        if (runtime.relogin === login) runtime.relogin = null;
       });
+      runtime.relogin = login;
     }
     await runtime.relogin;
   }
@@ -499,13 +544,21 @@ export class RemoteHostManager extends EventEmitter {
   }
 
   private scheduleConnect(runtime: HostRuntime, delayMs: number, replace?: "if-idle" | "force"): void {
+    if (!runtime.wanted || this.hosts.get(runtime.config.id) !== runtime) return;
     if (runtime.retryTimer) clearTimeout(runtime.retryTimer);
     runtime.retryTimer = setTimeout(() => {
       runtime.retryTimer = null;
-      if (!runtime.wanted || !this.hosts.has(runtime.config.id)) return;
-      runtime.connecting = this.doConnect(runtime, replace).finally(() => {
-        runtime.connecting = null;
+      const generation = runtime.generation;
+      const previous = runtime.connecting;
+      const connecting = (async () => {
+        // Cancelled SSH/tar cleanup must settle before the next attempt starts.
+        await previous;
+        if (!runtime.wanted || this.hosts.get(runtime.config.id) !== runtime || generation !== runtime.generation) return;
+        await this.doConnect(runtime, replace);
+      })().finally(() => {
+        if (runtime.connecting === connecting) runtime.connecting = null;
       });
+      runtime.connecting = connecting;
     }, delayMs);
     runtime.retryTimer.unref?.();
   }
@@ -515,19 +568,29 @@ export class RemoteHostManager extends EventEmitter {
     runtime.retryTimer = null;
     if (runtime.healthTimer) clearInterval(runtime.healthTimer);
     runtime.healthTimer = null;
+    runtime.controller?.abort();
     runtime.runningStream?.abort();
     runtime.runningStream = null;
-    if (runtime.tunnel && runtime.tunnel.exitCode === null) runtime.tunnel.kill("SIGTERM");
+    const tunnel = runtime.tunnel;
     runtime.tunnel = null;
-    runtime.running = { ids: [], suppressed: [], listVersion: null };
+    if (tunnel && tunnel.exitCode === null) tunnel.kill("SIGKILL");
+    runtime.password = null;
+    runtime.cookie = null;
+    runtime.relogin = null;
+    runtime.healthCheck = null;
+    // Keep the last running snapshot until an authoritative remote event replaces
+    // it. Offline/removed transport must never masquerade as agent completion.
   }
 
   private async doConnect(runtime: HostRuntime, replace?: "if-idle" | "force"): Promise<void> {
     runtime.generation += 1;
     const generation = runtime.generation;
-    const stale = () => generation !== runtime.generation || !runtime.wanted;
     const wasOnline = runtime.connectedAt !== null;
     this.teardown(runtime);
+    const controller = new AbortController();
+    runtime.controller = controller;
+    const stale = () => generation !== runtime.generation || !runtime.wanted || controller.signal.aborted;
+    runtime.authRetryAfter = 0;
     runtime.busySessionIds = null;
     const progress = (phase: string) => {
       if (!stale()) this.setStatus(runtime, wasOnline ? "reconnecting" : "connecting", phase, null);
@@ -576,7 +639,7 @@ export class RemoteHostManager extends EventEmitter {
           );
         }
         throw new HostConnectError(
-          "start_failed",
+          started.error === "server_identity_unknown" ? "server_identity_unknown" : "start_failed",
           `The remote server did not start (${String(started.error ?? "unknown")}).`,
           typeof started.log === "string" ? started.log : undefined,
         );
@@ -584,7 +647,6 @@ export class RemoteHostManager extends EventEmitter {
       runtime.password = String(started.password ?? "");
       runtime.remotePort = Number(started.port);
       runtime.version = bundle.version;
-      void this.bootstrap(runtime, ["prune", bundle.version], 60_000).catch(() => undefined);
 
       progress("tunnel");
       await this.openTunnel(runtime, generation);
@@ -605,9 +667,15 @@ export class RemoteHostManager extends EventEmitter {
       runtime.connectedAt = now();
       runtime.lastOnlineAt = now();
       this.setStatus(runtime, "online", null, null);
+      if (stale()) return; // A change listener may disconnect/remove synchronously.
       this.startRunningStream(runtime, generation);
       runtime.healthTimer = setInterval(() => void this.checkHealth(runtime, generation), HEALTH_INTERVAL_MS);
       runtime.healthTimer.unref?.();
+      // Each server version takes ~160 MB on the host. Remove the ones nothing
+      // uses: never the running one, and none installed in the last day, since
+      // another window may be installing or starting it right now.
+      void this.bootstrap(runtime, ["prune", `--min-age-hours=${PRUNE_MIN_AGE_HOURS}`, bundle.version], 60_000)
+        .catch(() => undefined);
     } catch (error) {
       if (stale()) return;
       this.teardown(runtime);
@@ -631,7 +699,9 @@ export class RemoteHostManager extends EventEmitter {
   private async bootstrap(runtime: HostRuntime, args: string[], timeoutMs: number): Promise<Record<string, unknown>> {
     let result: SshResult;
     try {
-      result = await runSsh(runtime.config.ssh, `sh -s -- ${args.join(" ")}`, { stdin: BOOTSTRAP_SCRIPT, timeoutMs });
+      const signal = runtime.controller?.signal;
+      signal?.throwIfAborted();
+      result = await runSsh(runtime.config.ssh, `sh -s -- ${args.join(" ")}`, { stdin: BOOTSTRAP_SCRIPT, timeoutMs, signal });
     } catch (error) {
       if ((error as Error).message?.includes("SSH target")) {
         throw new HostConnectError("invalid_target", (error as Error).message);
@@ -643,27 +713,57 @@ export class RemoteHostManager extends EventEmitter {
     return json;
   }
 
-  private install(runtime: HostRuntime, bundle: ServerBundle, platform: string): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const tar = spawnBundleTar(bundle, platform);
-      let tarError = "";
-      tar.stderr?.on("data", (chunk: Buffer) => {
-        tarError += chunk.toString("utf8");
+  private async install(runtime: HostRuntime, bundle: ServerBundle, platform: string): Promise<void> {
+    const signal = runtime.controller!.signal;
+    signal.throwIfAborted();
+    const tar = spawnBundleTar(bundle, platform);
+    const upload = new AbortController();
+    const cancel = () => upload.abort();
+    const killTar = () => {
+      tar.stdout?.destroy();
+      if (tar.exitCode === null) tar.kill("SIGKILL");
+    };
+    signal.addEventListener("abort", cancel, { once: true });
+    upload.signal.addEventListener("abort", killTar, { once: true });
+    let tarError = "";
+    tar.stderr?.on("data", (chunk: Buffer) => { tarError = (tarError + chunk.toString("utf8")).slice(-4000); });
+    const tarDone = new Promise<void>((resolve, reject) => {
+      tar.once("error", (error) => { upload.abort(); reject(error); });
+      tar.once("close", (code) => {
+        if (code === 0) resolve();
+        else { upload.abort(); reject(new Error(`tar exited with code ${code}: ${tarError}`)); }
       });
-      tar.on("error", (error) => reject(new HostConnectError("install_failed", `tar failed: ${error.message}`)));
-      runSsh(runtime.config.ssh, installCommand(bundle.version), { stdin: tar.stdout!, timeoutMs: 15 * 60_000 })
-        .then((result) => {
-          const json = lastJsonLine(result.stdout);
-          if (json?.ok === true) resolve();
-          else if (result.code === 255) reject(sshError(result));
-          else reject(new HostConnectError("install_failed", "Uploading the server failed.", `${result.stderr}\n${tarError}`.trim()));
-        })
-        .catch((error) => reject(new HostConnectError("install_failed", `Uploading the server failed: ${(error as Error).message}`)));
     });
+    // Handle an early tar failure even if SSH fails to spawn synchronously.
+    void tarDone.catch(() => undefined);
+    let transfer: Promise<void> | undefined;
+    try {
+      signal.throwIfAborted();
+      upload.signal.throwIfAborted();
+      transfer = runSsh(runtime.config.ssh, installCommand(bundle.version), {
+        stdin: tar.stdout!, timeoutMs: 15 * 60_000, signal: upload.signal,
+      }).then((result) => {
+        if (result.code === 0 && lastJsonLine(result.stdout)?.ok === true) return;
+        if (result.code === 255) throw sshError(result);
+        throw new HostConnectError("install_failed", "Uploading the server failed.", `${result.stderr}\n${tarError}`.trim());
+      });
+      await Promise.all([transfer, tarDone]);
+      signal.throwIfAborted();
+    } catch (error) {
+      throw error instanceof HostConnectError ? error : new HostConnectError("install_failed", `Uploading the server failed: ${(error as Error).message}`);
+    } finally {
+      upload.abort();
+      await Promise.allSettled([transfer, tarDone]);
+      signal.removeEventListener("abort", cancel);
+    }
   }
 
   private async openTunnel(runtime: HostRuntime, generation: number): Promise<void> {
+    const signal = runtime.controller!.signal;
+    signal.throwIfAborted();
     const localPort = await freePort(runtime.localPort);
+    signal.throwIfAborted();
+    if (generation !== runtime.generation) return;
     runtime.localPort = localPort;
     runtime.tunnelStderr = "";
     const tunnel = spawnTunnel(runtime.config.ssh, localPort, runtime.remotePort!);
@@ -677,7 +777,7 @@ export class RemoteHostManager extends EventEmitter {
     });
     tunnel.on("exit", () => {
       exited = true;
-      if (generation !== runtime.generation || !runtime.wanted || runtime.tunnel !== tunnel) return;
+      if (generation !== runtime.generation || !runtime.wanted || runtime.tunnel !== tunnel || runtime.status !== "online") return;
       // The tunnel died under a live connection: reconnect quickly.
       runtime.tunnel = null;
       this.teardown(runtime);
@@ -691,7 +791,7 @@ export class RemoteHostManager extends EventEmitter {
       this.scheduleConnect(runtime, delay);
     });
     try {
-      await waitForPort(localPort, 30_000, () => exited);
+      await waitForPort(localPort, 30_000, () => exited, signal);
     } catch (error) {
       throw new HostConnectError(
         "tunnel_failed",
@@ -703,72 +803,79 @@ export class RemoteHostManager extends EventEmitter {
 
   private async login(runtime: HostRuntime): Promise<void> {
     if (!runtime.localPort) throw new HostConnectError("login_failed", "no tunnel");
-    let lastStatus = 0;
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      const response = await undici.request(`http://127.0.0.1:${runtime.localPort}/api/web-auth`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ password: runtime.password ?? "" }),
-        dispatcher: this.dispatcher,
-        signal: AbortSignal.timeout(15_000),
-      }).catch((error: Error) => {
-        throw new HostConnectError("login_failed", `Login request failed: ${error.message}`);
-      });
-      lastStatus = response.statusCode;
-      await response.body.dump();
-      if (response.statusCode === 200) {
-        const setCookie = response.headers["set-cookie"];
-        const cookies = Array.isArray(setCookie) ? setCookie : setCookie ? [setCookie] : [];
-        const session = cookies.map((value) => value.split(";")[0]!).find((value) => value.startsWith("pi_web_session="));
-        runtime.cookie = session ?? null;
-        return;
-      }
-      if (response.statusCode === 404) {
-        // Server without a password (should not happen for bootstrapped hosts).
-        runtime.cookie = null;
-        return;
-      }
-      if (response.statusCode === 429) {
-        await new Promise((resolve) => setTimeout(resolve, 2_000 * (attempt + 1)));
-        continue;
-      }
-      break;
+    const signal = runtime.controller!.signal;
+    signal.throwIfAborted();
+    const response = await undici.request(`http://127.0.0.1:${runtime.localPort}/api/web-auth`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ password: runtime.password ?? "" }),
+      dispatcher: this.dispatcher,
+      signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)]),
+    });
+    await response.body.dump();
+    signal.throwIfAborted();
+    const setCookie = response.headers["set-cookie"];
+    const cookies = Array.isArray(setCookie) ? setCookie : setCookie ? [setCookie] : [];
+    const session = cookies.map((value) => value.split(";")[0]!).find((value) => /^pi_web_session=.+/.test(value));
+    if (response.statusCode !== 200 || !session) {
+      // Missing auth, bad credentials and rate limits need intervention, not
+      // another reconnect loop hitting the remote's global login throttle.
+      throw new HostConnectError("login_rejected", `The remote server rejected the login (HTTP ${response.statusCode}, session cookie ${session ? "present" : "missing"}).`);
     }
-    throw new HostConnectError("login_failed", `The remote server rejected the login (HTTP ${lastStatus}).`);
+    runtime.cookie = session;
   }
 
   private async fetchInfo(runtime: HostRuntime, timeoutMs: number): Promise<RemoteServerInfo> {
-    const response = await undici.request(`http://127.0.0.1:${runtime.localPort}/api/remote-info`, {
-      headers: { ...(runtime.cookie ? { cookie: runtime.cookie } : {}), accept: "application/json" },
-      dispatcher: this.dispatcher,
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-    if (response.statusCode === 401) {
+    const signal = AbortSignal.any([runtime.controller!.signal, AbortSignal.timeout(timeoutMs)]);
+    const url = `http://127.0.0.1:${runtime.localPort}/api/remote-info`;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      signal.throwIfAborted();
+      const cookie = runtime.cookie;
+      const response = await undici.request(url, {
+        headers: { ...(cookie ? { cookie } : {}), accept: "application/json" },
+        dispatcher: this.dispatcher,
+        signal,
+      });
+      if (response.statusCode === 200) return await response.body.json() as RemoteServerInfo;
       await response.body.dump();
-      await this.login(runtime);
-      return this.fetchInfo(runtime, timeoutMs);
+      signal.throwIfAborted();
+      if (response.statusCode === 401 && attempt === 0) {
+        await this.reauthenticate(runtime, cookie);
+        continue;
+      }
+      throw new HostConnectError(response.statusCode === 401 ? "login_rejected" : "handshake_failed", `remote-info returned HTTP ${response.statusCode}`);
     }
-    if (response.statusCode !== 200) {
-      await response.body.dump();
-      throw new HostConnectError("handshake_failed", `remote-info returned HTTP ${response.statusCode}`);
-    }
-    return await response.body.json() as RemoteServerInfo;
+    throw new HostConnectError("handshake_failed", "remote-info failed");
   }
 
   private async checkHealth(runtime: HostRuntime, generation: number): Promise<void> {
     if (generation !== runtime.generation || runtime.status !== "online") return;
-    try {
-      await this.fetchInfo(runtime, 10_000);
-      runtime.healthFailures = 0;
-      runtime.lastOnlineAt = now();
-    } catch {
-      runtime.healthFailures += 1;
-      if (runtime.healthFailures >= 2 && generation === runtime.generation) {
-        // Killing the tunnel routes through the exit handler's reconnect path.
-        if (runtime.tunnel) runtime.tunnel.kill("SIGTERM");
-        else this.scheduleConnect(runtime, 0);
+    if (runtime.healthCheck) return runtime.healthCheck;
+    const check = (async () => {
+      try {
+        await this.fetchInfo(runtime, 10_000);
+        if (generation !== runtime.generation || runtime.status !== "online") return;
+        runtime.healthFailures = 0;
+        runtime.lastOnlineAt = now();
+      } catch (error) {
+        if (generation !== runtime.generation || runtime.status !== "online") return;
+        if (error instanceof HostConnectError && error.code === "login_rejected") {
+          this.teardown(runtime);
+          this.setStatus(runtime, "error", null, { code: error.code, message: error.message });
+          return;
+        }
+        runtime.healthFailures += 1;
+        if (runtime.healthFailures >= 2) {
+          this.teardown(runtime);
+          this.setStatus(runtime, "reconnecting", null, null);
+          this.scheduleConnect(runtime, 0);
+        }
       }
-    }
+    })().finally(() => {
+      if (runtime.healthCheck === check) runtime.healthCheck = null;
+    });
+    runtime.healthCheck = check;
+    return check;
   }
 
   /** Follow the host's running-session stream so the merged sidebar stays live. */
@@ -787,9 +894,10 @@ export class RemoteHostManager extends EventEmitter {
             throw new Error(`HTTP ${response.statusCode}`);
           }
           for await (const event of parseSse(response.body)) {
+            if (controller.signal.aborted || generation !== runtime.generation || runtime.status !== "online") return;
             const data = JSON.parse(event.data) as { type?: string; runningSessionIds?: string[]; sessionListVersion?: number };
-            if (data.type !== "running") continue;
-            const ids = Array.isArray(data.runningSessionIds) ? data.runningSessionIds : [];
+            if (data.type !== "running" || !Array.isArray(data.runningSessionIds) || !data.runningSessionIds.every((id) => typeof id === "string")) continue;
+            const ids = data.runningSessionIds;
             const listVersion = typeof data.sessionListVersion === "number" ? data.sessionListVersion : runtime.running.listVersion;
             const changed = ids.join(",") !== runtime.running.ids.join(",") || listVersion !== runtime.running.listVersion;
             runtime.running = { ...runtime.running, ids, listVersion };
@@ -798,7 +906,7 @@ export class RemoteHostManager extends EventEmitter {
         } catch {
           if (controller.signal.aborted) return;
         }
-        await new Promise((resolve) => setTimeout(resolve, 2_000));
+        await delay(2_000, undefined, { signal: controller.signal }).catch(() => undefined);
       }
     };
     void loop();
