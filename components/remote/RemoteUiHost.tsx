@@ -5,7 +5,7 @@
  * diagnose / remove) and the remote folder picker used by "add project".
  * Mounted once by AppShell; opened through the functions below.
  */
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 
 import { DirectoryPicker } from "@/components/DirectoryPicker";
@@ -13,12 +13,16 @@ import { useI18n } from "@/hooks/useI18n";
 import { localFetch, refreshRemoteHosts } from "@/lib/remote/client";
 import { remoteClientStore } from "@/lib/remote/client-store";
 import type { RemoteHostSnapshot } from "@/lib/remote/types";
+import { openStackedDialog } from "@/lib/stacked-dialog";
 
+import { BackendScopeProvider } from "./BackendScope";
 import { GlobeIcon, hostProblemText, hostStatusTone, useRemoteClientState } from "./useRemote";
 
+export type RemoteFolderSelection = (cwd: string, host: string) => void;
+
 type DialogState =
-  | { kind: "hosts"; focusHost?: string; diagnose?: boolean; onPicked?: (cwd: string) => void }
-  | { kind: "picker"; hostId: string; onPicked: (cwd: string) => void }
+  | { kind: "hosts"; focusHost?: string; diagnose?: boolean; onPicked?: RemoteFolderSelection }
+  | { kind: "picker"; hostId: string; onPicked: RemoteFolderSelection }
   | null;
 
 let dialogState: DialogState = null;
@@ -26,19 +30,16 @@ const dialogListeners = new Set<() => void>();
 
 function setDialog(next: DialogState): void {
   dialogState = next;
-  // Set the picker's host before DirectoryPicker mounts: its first listing
-  // runs in a child effect, before any effect of RemoteDirectoryPicker.
-  remoteClientStore.setBrowseHost(next?.kind === "picker" ? next.hostId : null);
   for (const listener of dialogListeners) listener();
 }
 
 /** Open the SSH host manager. `onPicked` receives a folder chosen on a newly connected host. */
-export function openRemoteHostsDialog(options: { focusHost?: string; diagnose?: boolean; onPicked?: (cwd: string) => void } = {}): void {
+export function openRemoteHostsDialog(options: { focusHost?: string; diagnose?: boolean; onPicked?: RemoteFolderSelection } = {}): void {
   setDialog({ kind: "hosts", ...options });
 }
 
 /** Open the folder picker on a remote host. */
-export function openRemoteDirectoryPicker(hostId: string, onPicked: (cwd: string) => void): void {
+export function openRemoteDirectoryPicker(hostId: string, onPicked: RemoteFolderSelection): void {
   setDialog({ kind: "picker", hostId, onPicked });
 }
 
@@ -66,7 +67,11 @@ export function RemoteUiHost() {
   );
   if (!dialog) return null;
   if (dialog.kind === "picker") {
-    return <RemoteDirectoryPicker key={dialog.hostId} hostId={dialog.hostId} onPicked={dialog.onPicked} onClose={closeRemoteDialogs} />;
+    return (
+      <BackendScopeProvider host={dialog.hostId}>
+        <RemoteDirectoryPicker key={dialog.hostId} hostId={dialog.hostId} onPicked={dialog.onPicked} onClose={closeRemoteDialogs} />
+      </BackendScopeProvider>
+    );
   }
   return (
     <RemoteHostsDialog
@@ -80,7 +85,7 @@ export function RemoteUiHost() {
 
 // ------------------------------------------------------------------ folder picker
 
-function RemoteDirectoryPicker({ hostId, onPicked, onClose }: { hostId: string; onPicked: (cwd: string) => void; onClose: () => void }) {
+function RemoteDirectoryPicker({ hostId, onPicked, onClose }: { hostId: string; onPicked: RemoteFolderSelection; onClose: () => void }) {
   const { t } = useI18n();
   const state = useRemoteClientState();
   const host = state.hosts.find((item) => item.id === hostId);
@@ -96,15 +101,17 @@ function RemoteDirectoryPicker({ hostId, onPicked, onClose }: { hostId: string; 
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ cwd: path }),
       });
-      const data = await response.json().catch(() => ({})) as { cwd?: string; projectRoot?: string; error?: string };
+      const data = await response.json().catch(() => ({})) as { cwd?: string; projectRoot?: string; projectKey?: string; error?: string };
       if (!response.ok || !data.cwd) {
         setError(data.error ?? `HTTP ${response.status}`);
         return;
       }
       remoteClientStore.addRemoteRoot(hostId, data.projectRoot ?? data.cwd);
       if (data.projectRoot && data.projectRoot !== data.cwd) remoteClientStore.addRemoteRoot(hostId, data.cwd);
+      remoteClientStore.rememberProject({ host: hostId, cwd: data.cwd, projectRoot: data.projectRoot ?? data.cwd, projectKey: data.projectKey });
+      remoteClientStore.selectWorkspace(null, data.cwd, hostId);
       onClose();
-      onPicked(data.cwd);
+      onPicked(data.cwd, hostId);
     } catch (selectError) {
       setError((selectError as Error).message);
     } finally {
@@ -190,18 +197,16 @@ function HostRow({ host, t, children }: { host: RemoteHostSnapshot; t: Translate
 
 function RemoteModal({ title, onClose, children, wide = false }: { title: string; onClose: () => void; children: React.ReactNode; wide?: boolean }) {
   const [target, setTarget] = useState<HTMLElement | null>(null);
+  const dialogRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => setTarget(document.body), []);
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  useLayoutEffect(() => {
+    if (!target) return;
+    return openStackedDialog(document, dialogRef.current, onClose);
+  }, [target, onClose]);
   if (!target) return null;
   return createPortal(
     <div className="remote-dialog-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-      <div className={`remote-dialog${wide ? " is-wide" : ""}`} role="dialog" aria-modal="true" aria-label={title}>
+      <div ref={dialogRef} tabIndex={-1} className={`remote-dialog${wide ? " is-wide" : ""}`} role="dialog" aria-modal="true" aria-label={title}>
         <div className="remote-dialog-header">
           <strong>{title}</strong>
           <button type="button" className="config-close-button" onClick={onClose} aria-label="×">×</button>
@@ -221,7 +226,7 @@ function RemoteHostsDialog({
 }: {
   focusHost?: string;
   diagnose?: boolean;
-  onPicked?: (cwd: string) => void;
+  onPicked?: RemoteFolderSelection;
   onClose: () => void;
 }) {
   const { t } = useI18n();

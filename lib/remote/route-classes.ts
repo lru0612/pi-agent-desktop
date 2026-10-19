@@ -89,7 +89,7 @@ export function classifyApiPath(pathname: string): RouteClass {
   switch (head) {
     case "sessions":
       if (!second) return { kind: "aggregate", target: "/api/remote-hosts/aggregate/sessions" };
-      if (second === "search") return { kind: "local" };
+      if (second === "search") return { kind: "aggregate", target: "/api/remote-hosts/aggregate/search" };
       return { kind: "session", id: decodeSegment(second) };
     case "agent":
       if (second === "new") return { kind: "cwd", fallback: "workspace" };

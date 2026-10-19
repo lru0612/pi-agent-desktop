@@ -624,12 +624,12 @@ test("the container starts loading and remembers the selection per project", () 
 test("the container saves the Code mode choice, then reads back what is stored", () => {
   // Only a change is saved; the pressed option does nothing.
   assert.match(source, /onChange=\{\(value\) => \{\n\s*if \(value !== preference\) onChange\(value\);/);
-  assert.match(source, /const result = await saveMcpCodemodePreference\(preference, undefined, controller\.signal\);/);
+  assert.match(source, /const result = await saveMcpCodemodePreference\(preference, fetch, controller\.signal\);/);
   // A save answered after the panel closed changes nothing.
   assert.match(source, /if \(saveControllerRef\.current !== controller\) return;/);
   // The stored preference is shown at once, and the overview is read again whatever the outcome:
   // a timed-out save may still land, and a refused one may mean the file changed.
-  const save = source.slice(source.indexOf("const saveCodemode = useCallback"), source.indexOf("}, [refresh]);", source.indexOf("const saveCodemode")));
+  const save = source.slice(source.indexOf("const saveCodemode = useCallback"), source.indexOf("}, [fetch, refresh]);", source.indexOf("const saveCodemode")));
   assert.match(save, /withMcpCodemodePreference\(current\.data, result\.preference\)/);
   assert.match(save, /\n    void refresh\(\);\n {2}$/);
   // Nothing reloads an open session: pi applies defaultTools when it creates one.
@@ -693,9 +693,9 @@ test("the Code mode pane's budget field saves a whole number, or empty for pi's 
 });
 
 test("the container saves the budget like the choice, then reads back what is stored", () => {
-  const save = source.slice(source.indexOf("const saveCodemodeInlineBudget = useCallback"), source.indexOf("}, [refresh]);", source.indexOf("const saveCodemodeInlineBudget")));
+  const save = source.slice(source.indexOf("const saveCodemodeInlineBudget = useCallback"), source.indexOf("}, [fetch, refresh]);", source.indexOf("const saveCodemodeInlineBudget")));
   assert.match(save, /setCodemodeSave\(\{ saving: true, error: null, target: "inlineBudget" \}\);/);
-  assert.match(save, /const result = await saveMcpCodemodeInlineBudget\(budget, undefined, controller\.signal\);/);
+  assert.match(save, /const result = await saveMcpCodemodeInlineBudget\(budget, fetch, controller\.signal\);/);
   assert.match(save, /if \(saveControllerRef\.current !== controller\) return;/);
   assert.match(save, /withMcpCodemodeInlineBudget\(current\.data, result\.inlineBudget\)/);
   assert.match(save, /\n    void refresh\(\);\n {2}$/);
@@ -769,9 +769,9 @@ test("the Code mode pane's Built-in tools switch keeps tools declared or leaves 
 });
 
 test("the container saves the mode like the choice, then reads back what is stored", () => {
-  const save = source.slice(source.indexOf("const saveCodemodeMode = useCallback"), source.indexOf("}, [refresh]);", source.indexOf("const saveCodemodeMode")));
+  const save = source.slice(source.indexOf("const saveCodemodeMode = useCallback"), source.indexOf("}, [fetch, refresh]);", source.indexOf("const saveCodemodeMode")));
   assert.match(save, /setCodemodeSave\(\{ saving: true, error: null, target: "mode" \}\);/);
-  assert.match(save, /const result = await saveMcpCodemodeMode\(mode, undefined, controller\.signal\);/);
+  assert.match(save, /const result = await saveMcpCodemodeMode\(mode, fetch, controller\.signal\);/);
   assert.match(save, /if \(saveControllerRef\.current !== controller\) return;/);
   assert.match(save, /withMcpCodemodeMode\(current\.data, result\.mode\)/);
   assert.match(save, /\n    void refresh\(\);\n {2}$/);
@@ -1023,7 +1023,7 @@ test("a removal offers Undo until the route lets it go, and says why an undo fai
 test("the container posts each change and shows the overview it answers with", () => {
   // One change at a time, through the helper; its answer replaces the listing.
   const run = source.slice(source.indexOf("const runAction = useCallback"), source.indexOf("const switchServer = useCallback"));
-  assert.match(run, /const result = await postMcpAction\(request, writeCwd, undefined, controller\.signal\);/);
+  assert.match(run, /const result = await postMcpAction\(request, writeCwd, fetch, controller\.signal\);/);
   assert.match(run, /if \(actionControllerRef\.current !== controller\) return undefined;/);
   assert.match(run, /if \(result\.ok\) applyOverview\(result\.data, select\?\.\(result\.data\)\);\n\s*else void refresh\(\);/);
   // The project is sent only when the listing covers it; a refused folder would refuse the change.
@@ -1341,7 +1341,7 @@ test("the container tests one server at a time each, beside any change, and give
   assert.match(body, /const testCwd = current\.state === "loaded" && current\.data\.project \? cwd : null;/);
   // No signal: neither the panel closing nor its deadline aborts a test, since the route stops a
   // test nobody waits for and records nothing.
-  assert.match(body, /const result = await postMcpTest\(\{ scope: server\.scope, name: server\.name \}, testCwd\);/);
+  assert.match(body, /const result = await postMcpTest\(\{ scope: server\.scope, name: server\.name \}, testCwd, fetch\);/);
   assert.doesNotMatch(body, /abort/);
   assert.match(source, /testRequests\.clear\(\);/);
   assert.doesNotMatch(source, /testControllers/);
@@ -1514,21 +1514,21 @@ test("the connection a sign-in made is summed up as a sign-in's in the Connectio
 
 test("the container starts, polls, pastes into and cancels a sign-in, and signs out as a change", () => {
   const body = (name, end) => source.slice(source.indexOf(`const ${name} = useCallback`), source.indexOf(end, source.indexOf(`const ${name} = useCallback`)));
-  const start = body("startSignIn", "}, [cwd, refresh]);");
+  const start = body("startSignIn", "}, [cwd, fetch, refresh]);");
   // As for Test: the project only when the listing covers it, and no signal, since the flow lives on the server.
   assert.match(start, /const signInCwd = listing\.state === "loaded" && listing\.data\.project \? cwd : null;/);
-  assert.match(start, /const result = await postMcpSignIn\(\{ scope: server\.scope, name: server\.name \}, signInCwd\);/);
+  assert.match(start, /const result = await postMcpSignIn\(\{ scope: server\.scope, name: server\.name \}, signInCwd, fetch\);/);
   assert.doesNotMatch(start, /abort|signal/);
   // A press while one starts or runs does nothing: the route would only join it.
   assert.match(start, /if \(current\?\.starting \|\| mcpSignInActive\(current\)\) return;/);
   // A refusal may mean the listing is out of date.
   assert.match(start, /if \(!result\.ok && result\.error\.reason !== undefined && !result\.error\.timedOut\) void refresh\(\);/);
   // Polling: about once a second while a flow runs, aborted only as the panel goes; a flow that ended reloads the overview.
-  assert.match(source, /const result = await getMcpSignIn\(flowId, undefined, controller\.signal\);/);
+  assert.match(source, /const result = await getMcpSignIn\(flowId, fetch, controller\.signal\);/);
   assert.match(source, /\}, MCP_SIGN_IN_POLL_MS\);/);
   assert.match(source, /if \(Object\.keys\(signIns\)\.some\(\(key\) => mcpSignInJustEnded\(previous\[key\], signIns\[key\]\)\)\) void refresh\(\);/);
-  assert.match(body("pasteSignIn", "}, []);"), /const result = await pasteMcpSignIn\(flowId, value\);/);
-  assert.match(body("cancelSignIn", "}, []);"), /const result = await cancelMcpSignInFlow\(flowId\);/);
+  assert.match(body("pasteSignIn", "}, [fetch]);"), /const result = await pasteMcpSignIn\(flowId, value, fetch\);/);
+  assert.match(body("cancelSignIn", "}, [fetch]);"), /const result = await cancelMcpSignInFlow\(flowId, fetch\);/);
   // Sign out writes mcp-auth.json through POST /api/mcp, as one more change the controls wait for.
   const signOut = body("signOut", "}, [runAction]);");
   assert.match(signOut, /await runAction\(\{ action: "sign-out", scope: server\.scope, name: server\.name \}, `sign-out:\$\{key\}`\);/);

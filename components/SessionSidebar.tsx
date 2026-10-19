@@ -1,11 +1,15 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useState, useCallback, useRef, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useState, useCallback, useMemo, useRef, type ReactNode } from "react";
 import type { SessionInfo } from "@/lib/types";
 import { listSessionFamilies } from "@/lib/session-family";
 import { dispatchSessionRowContextMenu } from "@/lib/session-row-context-menu";
 import { skillExpansionToCommand } from "@/lib/slash-display";
-import { workspaceKeyOf } from "@/lib/workspace-memory";
+import type { HostedSessionInfo } from "@/lib/remote/types";
+import { hostedProjectKey, resolveHostedProject } from "@/lib/remote/project-identity";
+import { createBackendApi, type BackendApi } from "@/lib/remote/scoped-api";
+import { localFetch } from "@/lib/remote/client";
+import { BackendScopeProvider } from "@/components/remote/BackendScope";
 import { useI18n } from "@/hooks/useI18n";
 import { formatCompactRelativeTime, formatRelativeTime } from "@/lib/i18n/format";
 import { createPortal } from "react-dom";
@@ -40,7 +44,7 @@ import { prefetchSessionData } from "@/lib/session-data-cache";
 import { isImeComposing } from "@/lib/ime";
 import { RemoteProjectBadge } from "@/components/remote/RemoteProjectBadge";
 import { openAddProjectMenu } from "@/components/remote/RemoteIntegration";
-import { canUseNativeFileActions, remoteClientStore } from "@/lib/remote/client-store";
+import { remoteClientStore } from "@/lib/remote/client-store";
 import { useRemoteClientState } from "@/components/remote/useRemote";
 
 function sessionListUrl(summary: boolean, force: boolean): string {
@@ -51,7 +55,7 @@ function sessionListUrl(summary: boolean, force: boolean): string {
 interface Props {
   selectedSessionId: string | null;
   onSelectSession: (session: SessionInfo, isRestore?: boolean, entryId?: string, blockIndex?: number) => void;
-  onNewSession?: (sessionId: string, cwd: string) => void;
+  onNewSession?: (sessionId: string, cwd: string, host?: string | null) => void;
   initialSessionId?: string | null;
   skipInitialProjectSelection?: boolean;
   onInitialRestoreDone?: () => void;
@@ -62,8 +66,9 @@ interface Props {
     cwd: string | null,
     projectRoot?: string | null,
     projectKey?: string | null,
+    host?: string | null,
   ) => void;
-  onOpenTerminal?: (cwd: string) => void;
+  onOpenTerminal?: (cwd: string, host?: string | null) => void;
   /** Fired when a session that is not currently selected finishes running.
    *  Lets the app play a cross-workspace completion tone. */
   onBackgroundTaskDone?: () => void;
@@ -77,6 +82,7 @@ interface Props {
 }
 
 interface WorktreeState {
+  host: string | null;
   /** The cwd this data was fetched for — guards against stale responses */
   forCwd: string;
   projectRoot: string;
@@ -91,9 +97,18 @@ interface WorktreeState {
   worktrees: WorktreeEntry[];
 }
 
-interface ProjectSelection {
+interface ProjectMenuTarget {
   root: string;
-  key: string;
+  host: string | null;
+  api: BackendApi;
+}
+
+function projectMenuTarget(root: string, host: string | null): ProjectMenuTarget {
+  return { root, host, api: createBackendApi(host, localFetch, () => window.location.origin) };
+}
+
+function sameProject(a: { root: string; host?: string | null } | null, b: { root: string; host?: string | null }): boolean {
+  return a?.root === b.root && (a.host ?? null) === (b.host ?? null);
 }
 
 // Server error codes with a translation; any other code is shown verbatim.
@@ -179,8 +194,10 @@ function buildSessionTree(sessions: SessionInfo[]): SessionTreeNode[] {
 
 export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onProjectsChange, onBackgroundTaskDone, onRunningSessionIdsChange, onSessionsChange, headerControls, onOpenTerminal, onOpenScheduled, scheduledOpen = false }: Props) {
   const { t } = useI18n();
-  const remoteCurrentHost = useRemoteClientState().currentHost;
-  const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
+  const remoteState = useRemoteClientState();
+  const remoteCurrentHost = remoteState.currentHost;
+  const workspaceApi = useMemo(() => createBackendApi(remoteCurrentHost, localFetch, () => window.location.origin), [remoteCurrentHost]);
+  const [allSessions, setAllSessions] = useState<HostedSessionInfo[]>([]);
   // Tracked in a ref only: the version is compared against the polled value to
   // decide whether the list needs reloading, and no render reads it.
   const sessionListVersionRef = useRef<number | null>(null);
@@ -203,13 +220,14 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const [contentSearch, setContentSearch] = useState(false);
   // Worktree switcher state
   const [worktreeState, setWorktreeState] = useState<WorktreeState | null>(null);
-  const lastNotifiedProjectRef = useRef<{ cwd: string | null; key: string | null } | null>(null);
+  const lastNotifiedProjectRef = useRef<{ cwd: string | null; key: string | null; host: string | null } | null>(null);
 
   // The checked-out worktree for the current selection (falls back to the
   // project's main worktree when the selection is not itself a worktree).
   // Prefers the server-resolved currentWorktreePath: the browser cannot apply
   // Node path rules, so a raw comparison misses on Windows.
-  const currentWorktree = worktreeState
+  const currentWorktree = worktreeState?.host === remoteCurrentHost
+    && (worktreeState.forCwd === selectedCwd || worktreeState.worktrees.some((w) => w.path === selectedCwd))
     ? worktreeState.worktrees.find((worktree) => worktree.path === selectedCwd)
       ?? (worktreeState.forCwd === selectedCwd && worktreeState.currentWorktreePath
         ? worktreeState.worktrees.find((worktree) => worktree.path === worktreeState.currentWorktreePath)
@@ -217,17 +235,21 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       ?? worktreeState.worktrees.find((worktree) => worktree.isMain)
     : undefined;
   const currentWorktreePath = currentWorktree?.path ?? null;
+  const selectedWorkspaceRef = useRef({ cwd: selectedCwd, host: remoteCurrentHost, currentWorktreePath });
+  selectedWorkspaceRef.current = { cwd: selectedCwd, host: remoteCurrentHost, currentWorktreePath };
 
-  /** Resolve the project root for a cwd from the freshest data available */
-  const projectRootFor = useCallback((cwd: string | null): string | null => {
-    if (!cwd) return null;
-    if (worktreeState && worktreeState.forCwd === cwd) return worktreeState.projectRoot;
-    // Any path in the loaded worktree list belongs to that project — covers
-    // worktrees without sessions, so switching to them keeps the row mounted.
-    if (worktreeState?.worktrees.some((w) => w.path === cwd)) return worktreeState.projectRoot;
-    const match = allSessions.find((s) => s.cwd === cwd);
-    return match?.projectRoot ?? cwd;
-  }, [worktreeState, allSessions]);
+  /** Resolve only within the explicitly selected backend; paths are opaque. */
+  const projectFor = useCallback((cwd: string | null, host = remoteCurrentHost) => (
+    resolveHostedProject(cwd, host, allSessions, worktreeState, remoteState.projects)
+  ), [remoteCurrentHost, allSessions, worktreeState, remoteState.projects]);
+  const projectRootFor = useCallback((cwd: string | null, host = remoteCurrentHost): string | null => (
+    projectFor(cwd, host)?.root ?? null
+  ), [projectFor, remoteCurrentHost]);
+
+  const selectProjectCwd = useCallback((cwd: string, host: string | null) => {
+    remoteClientStore.selectWorkspace(null, cwd, host);
+    setSelectedCwd(cwd);
+  }, []);
   // Branch currently being checked out (name shown dimmed with a spinner)
   const [wtSwitchingBranch, setWtSwitchingBranch] = useState<string | null>(null);
   // Ticked by the poll/focus effect below so the worktree row reflects
@@ -251,9 +273,10 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       ? new Set(stored.filter((root): root is string => typeof root === "string"))
       : new Set();
   });
-  const [projectMenu, setProjectMenu] = useState<{ root: string } | null>(null);
+  const [projectMenu, setProjectMenu] = useState<ProjectMenuTarget | null>(null);
   const [projectMenuPos, setProjectMenuPos] = useState<{ top: number; left: number } | null>(null);
-  const [projectBranchMenu, setProjectBranchMenu] = useState<ProjectBranchMenuState | null>(null);
+  const [projectBranchMenu, setProjectBranchMenu] = useState<(ProjectBranchMenuState & { host: string | null }) | null>(null);
+  const projectMenuLoadId = useRef(0);
   const [projectMenuView, setProjectMenuView] = useState<ProjectMenuView>("actions");
   const [projectBranchLoading, setProjectBranchLoading] = useState(false);
   // "Open in file manager" on a project row. Only the server can raise a
@@ -271,7 +294,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       .catch(() => {});
     return () => { cancelled = true; };
   }, []);
-  const revealProjectInFileManager = useCallback(async (root: string) => {
+  const revealProjectInFileManager = useCallback(async (root: string, host: string | null = null) => {
+    if (host !== null) return;
     setProjectRevealError(null);
     if (isTauriDesktop()) {
       try {
@@ -486,6 +510,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     if (!projectMenu) return;
     const handler = (e: MouseEvent) => {
       if (projectMenuRef.current && !projectMenuRef.current.contains(e.target as Node)) {
+        projectMenuLoadId.current++;
         setProjectMenu(null);
         setProjectMenuPos(null);
         setProjectBranchMenu(null);
@@ -544,7 +569,12 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       onBackgroundTaskDone?.();
       const sessionName = (id: string) => {
         const session = allSessions.find((item) => item.id === id);
-        return session?.name || session?.firstMessage || id.slice(0, 8);
+        const name = session?.name || session?.firstMessage || id.slice(0, 8);
+        // Fork: say which SSH host finished the task.
+        const host = session?.host
+          ? remoteClientStore.getSnapshot().hosts.find((item) => item.id === session.host)?.label ?? session.host
+          : null;
+        return host ? `${name} · ${host}` : name;
       };
       for (const id of completedWithNotifications) {
         void notifyDesktop({
@@ -590,60 +620,36 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
 
   const restoredRef = useRef(false);
 
-  const projectSelection = useCallback((root: string, key: string): ProjectSelection => ({
-    root,
-    key,
-  }), []);
-
-  /** Resolve both display root and stable identity from server-provided data. */
-  const projectFor = useCallback((cwd: string | null): ProjectSelection | null => {
-    if (!cwd) return null;
-    // Custom-path identity validation lives in ProjectPicker (the extraction
-    // boundary this file's sentinel test guards); identity here resolves from
-    // server-provided worktree and session data only.
-    if (worktreeState && worktreeState.forCwd === cwd) {
-      return projectSelection(worktreeState.projectRoot, worktreeState.projectKey);
-    }
-    // Any path in the loaded worktree list belongs to that project — covers
-    // worktrees without sessions, so switching to them keeps the row mounted.
-    if (worktreeState?.worktrees.some((w) => w.path === cwd)) {
-      return projectSelection(worktreeState.projectRoot, worktreeState.projectKey);
-    }
-    const match = allSessions.find((session) => (
-      session.cwd === cwd || (session.projectRoot ?? session.cwd) === cwd
-    ));
-    return match
-      ? projectSelection(match.projectRoot ?? match.cwd, workspaceKeyOf(match))
-      : projectSelection(cwd, cwd);
-  }, [worktreeState, allSessions, projectSelection]);
-
-  // Selecting a directory is also the explicit "add project" action. If the
-  // project was previously removed from the sidebar, make it visible again
-  // without touching any of the session files discovered for that directory.
-  const activateProject = useCallback((cwd: string) => {
-    const projectRoot = projectRootFor(cwd) ?? cwd;
+  // Selecting a directory is also the explicit "add project" action. Only
+  // unarchive that host/root pair, without touching the discovered sessions.
+  const activateHostedProject = useCallback((cwd: string, host: string | null) => {
+    const projectRoot = hostedProjectKey(projectRootFor(cwd, host) ?? cwd, host);
     setArchivedProjectRoots((previous) => {
       if (!previous.has(projectRoot)) return previous;
       const next = new Set(previous);
       next.delete(projectRoot);
       return next;
     });
-    setSelectedCwd(cwd);
-  }, [projectRootFor]);
+    selectProjectCwd(cwd, host);
+  }, [projectRootFor, selectProjectCwd]);
 
-  // Notify parent only when the effective cwd actually changes (not when
-  // projectRootFor identity changes due to session/worktree refreshes).
+  const activateProject = useCallback((cwd: string) => {
+    activateHostedProject(cwd, null);
+  }, [activateHostedProject]);
+
+  // Host is part of the notification guard: same-path picks still change workspace.
   useEffect(() => {
     const project = projectFor(selectedCwd);
     const previous = lastNotifiedProjectRef.current;
-    if (previous?.cwd === selectedCwd && previous.key === (project?.key ?? null)) return;
-    lastNotifiedProjectRef.current = { cwd: selectedCwd, key: project?.key ?? null };
+    if (previous?.cwd === selectedCwd && previous.key === (project?.key ?? null) && previous.host === remoteCurrentHost) return;
+    lastNotifiedProjectRef.current = { cwd: selectedCwd, key: project?.key ?? null, host: remoteCurrentHost };
     onCwdChange?.(
       selectedCwd,
       project?.root ?? null,
       project?.key ?? null,
+      remoteCurrentHost,
     );
-  }, [selectedCwd, onCwdChange, projectFor]);
+  }, [selectedCwd, remoteCurrentHost, onCwdChange, projectFor]);
 
   // Sync the worktree switcher to the selected session's cwd. Sessions of all
   // worktrees in a project share one list, so clicking a session from another
@@ -665,7 +671,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       return;
     }
     let cancelled = false;
-    fetch(`/api/worktrees?cwd=${encodeURIComponent(selectedCwd)}`)
+    workspaceApi.fetch(`/api/worktrees?cwd=${encodeURIComponent(selectedCwd)}`)
       .then((r) => r.json())
       .then((d: { projectRoot?: string; projectKey?: string; isGit?: boolean; isTopLevel?: boolean; currentWorktreePath?: string | null; worktrees?: WorktreeEntry[]; error?: string }) => {
         if (cancelled) return;
@@ -674,6 +680,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
           return;
         }
         setWorktreeState({
+          host: remoteCurrentHost,
           forCwd: selectedCwd,
           projectRoot: d.projectRoot,
           projectKey: d.projectKey ?? d.projectRoot,
@@ -687,7 +694,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         if (!cancelled) setWorktreeState(null);
       });
     return () => { cancelled = true; };
-  }, [selectedCwd, wtRefreshKey, refreshKey, wtPollTick]);
+  }, [selectedCwd, remoteCurrentHost, workspaceApi, wtRefreshKey, refreshKey, wtPollTick]);
 
   // Keep the worktree/branch display honest when branches are switched outside
   // pi (terminal, IDE, another client): poll while the tab is visible and
@@ -709,7 +716,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
 
   // Most-recent projects, deduped by projectRoot, used to pick the default
   // cwd when no session is selected yet.
-  const recentProjects = getRecentProjects(allSessions);
+  const recentProjects = getRecentProjects(allSessions.filter((session) => !session.host));
   // Auto-select cwd and restore session from URL on first load
   useEffect(() => {
     if (allSessions.length === 0 || skipInitialProjectSelection) return;
@@ -720,6 +727,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         restoredRef.current = true;
         const target = allSessions.find((s) => s.id === initialSessionId);
         if (target) {
+          remoteClientStore.selectWorkspace(target.id, target.cwd, target.host ?? null);
           setSelectedCwd(target.cwd);
           onSelectSession(target, true);
           return;
@@ -727,116 +735,133 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         // Session not found — notify parent so it can show the placeholder
         onInitialRestoreDone?.();
       }
-      const projects = recentProjects;
-      if (projects.length > 0) setSelectedCwd(projects[0]);
+      const first = allSessions[0];
+      if (first) selectProjectCwd(first.projectRoot ?? first.cwd, first.host ?? null);
     }
-  }, [allSessions, selectedCwd, initialSessionId, skipInitialProjectSelection, onSelectSession, onInitialRestoreDone, recentProjects]);
+  }, [allSessions, selectedCwd, initialSessionId, skipInitialProjectSelection, onSelectSession, onInitialRestoreDone, selectProjectCwd]);
 
   // The worktree behind the active project's branch subtitle; falls back to
   // the main worktree while worktreeState catches up with a new selection.
   const currentWt = currentWorktree ?? null;
 
   const closeProjectMenu = useCallback(() => {
+    projectMenuLoadId.current++;
     setProjectMenu(null);
     setProjectMenuPos(null);
     setProjectBranchMenu(null);
     setProjectMenuView("actions");
   }, []);
 
-  /** Loads the branch and worktree lists behind the DOM menu's branch / worktree pages. */
-  const loadProjectMenuData = useCallback(async (projectRoot: string) => {
-    setProjectBranchMenu({ root: projectRoot, isGit: false, branches: [], remoteBranches: [], worktrees: [], loaded: false });
+  /** Loads against the menu's captured backend, never the active workspace. */
+  const loadProjectMenuData = useCallback(async (project: ProjectMenuTarget) => {
+    const loadId = ++projectMenuLoadId.current;
+    setProjectBranchMenu({ root: project.root, host: project.host, isGit: false, branches: [], remoteBranches: [], worktrees: [], loaded: false });
     setProjectBranchLoading(true);
     try {
-      const data = await fetchProjectBranchMenu(projectRoot);
-      setProjectBranchMenu((prev) => prev?.root === projectRoot ? data : prev);
+      const data = await fetchProjectBranchMenu(project.root, project.api.fetch);
+      if (loadId === projectMenuLoadId.current) setProjectBranchMenu({ ...data, host: project.host });
     } finally {
-      setProjectBranchLoading(false);
+      if (loadId === projectMenuLoadId.current) setProjectBranchLoading(false);
     }
   }, []);
 
+  const selectMenuWorktree = useCallback((project: ProjectMenuTarget, path: string, worktrees: WorktreeEntry[]) => {
+    setWorktreeState({
+      host: project.host,
+      projectRoot: project.root,
+      projectKey: projectFor(project.root, project.host)?.key ?? project.root,
+      forCwd: path,
+      isGit: true,
+      isTopLevel: true,
+      currentWorktreePath: path,
+      worktrees,
+    });
+    selectProjectCwd(path, project.host);
+  }, [projectFor, selectProjectCwd]);
+
   const worktreeActions = useProjectWorktreeActions({
-    onBranchesFetched: (projectRoot, lists) => {
-      setProjectBranchMenu((prev) => prev?.root === projectRoot ? { ...prev, ...lists } : prev);
+    onBranchesFetched: (_projectRoot, lists) => {
+      if (!projectMenu) return;
+      setProjectBranchMenu((prev) => sameProject(prev, projectMenu) ? { ...prev!, ...lists } : prev);
     },
-    onWorktreeCreated: (projectRoot, path, branch) => {
+    onWorktreeCreated: (_projectRoot, path, branch) => {
+      if (!projectMenu) return;
       closeProjectMenu();
-      // Register the new worktree right away so projectFor() resolves it to
-      // the main repo before the refetch lands (keeps AppShell from treating
-      // the new cwd as a different project).
-      setWorktreeState((prev) => prev?.projectRoot === projectRoot ? {
-        ...prev,
-        forCwd: path,
-        currentWorktreePath: path,
-        worktrees: [...prev.worktrees, { path, branch, isMain: false }],
-      } : prev);
-      setSelectedCwd(path);
+      // Register identity before selecting a previously unseen checkout. The
+      // physical cwd is an access grant, not another picked project row.
+      selectMenuWorktree(projectMenu, path, [...(projectBranchMenu?.worktrees ?? []), { path, branch, isMain: false }]);
       setWtRefreshKey((k) => k + 1);
     },
     onWorktreeRemoved: (projectRoot, path) => {
-      if (currentWorktreePath === path || selectedCwd === path) setSelectedCwd(projectRoot);
+      if (!projectMenu) return;
+      // Removing a background host's identically named checkout must not
+      // move the selected workspace. Keep the server-resolved path fallback.
+      const { cwd: selectedCwd, currentWorktreePath } = selectedWorkspaceRef.current;
+      if (remoteClientStore.currentHost === projectMenu.host) {
+        if (currentWorktreePath === path || selectedCwd === path) selectProjectCwd(projectRoot, projectMenu.host);
+      }
       setWtRefreshKey((k) => k + 1);
-      void loadProjectMenuData(projectRoot);
+      void loadProjectMenuData(projectMenu);
       void loadSessions(false);
     },
-  });
+  }, projectMenu?.api.fetch ?? workspaceApi.fetch);
   const { reset: resetWorktreeActions } = worktreeActions;
 
-  const showProjectMenuView = useCallback((projectRoot: string, view: ProjectMenuView) => {
+  const showProjectMenuView = useCallback((project: ProjectMenuTarget, view: ProjectMenuView) => {
     resetWorktreeActions();
     setProjectMenuView(view);
-    if (view !== "actions" && projectBranchMenu?.root !== projectRoot) void loadProjectMenuData(projectRoot);
+    if (view !== "actions" && !sameProject(projectBranchMenu, project)) void loadProjectMenuData(project);
     if (view === "actions") setProjectBranchMenu(null);
   }, [loadProjectMenuData, projectBranchMenu, resetWorktreeActions]);
 
-  /**
-   * Opens the DOM menu at a native popup's point, for the steps a native menu
-   * cannot do: typing a branch name, confirming a removal, showing an error.
-   */
-  const openDomProjectMenu = useCallback((projectRoot: string, at: NativeMenuPoint, view: ProjectMenuView, loaded?: ProjectBranchMenuState) => {
+  /** Native popups hand typing, confirmation and errors off to the DOM menu. */
+  const openDomProjectMenu = useCallback((project: ProjectMenuTarget, at: NativeMenuPoint, view: ProjectMenuView, loaded?: ProjectBranchMenuState) => {
     const menuWidth = 240;
-    setProjectMenu({ root: projectRoot });
+    projectMenuLoadId.current++;
+    setProjectMenu({ ...project });
     setProjectMenuPos({
       top: Math.max(8, Math.min(at.y, window.innerHeight - 160)),
       left: Math.max(8, Math.min(at.x, window.innerWidth - menuWidth - 8)),
     });
     setProjectMenuView(view);
     setProjectRevealError(null);
-    if (loaded?.root === projectRoot) setProjectBranchMenu(loaded);
-    else void loadProjectMenuData(projectRoot);
+    if (loaded?.root === project.root) setProjectBranchMenu({ ...loaded, host: project.host });
+    else void loadProjectMenuData(project);
   }, [loadProjectMenuData]);
 
-  const handleSwitchProjectBranch = useCallback(async (projectRoot: string, branch: string, loaded?: ProjectBranchMenuState, at?: NativeMenuPoint) => {
+  const handleSwitchProjectBranch = useCallback(async (project: ProjectMenuTarget, branch: string, loaded?: ProjectBranchMenuState, at?: NativeMenuPoint) => {
     if (wtSwitchingBranch) return;
-    const branchData = loaded ?? (projectBranchMenu?.root === projectRoot ? projectBranchMenu : null);
-    const checkout = branchData ? currentCheckout(branchData.worktrees, selectedCwd) ?? null : null;
+    const branchData = loaded ?? (sameProject(projectBranchMenu, project) ? projectBranchMenu : null);
+    const checkout = branchData ? currentCheckout(branchData.worktrees, project.host === remoteCurrentHost ? selectedCwd : null) ?? null : null;
     const holder = branchData?.worktrees.find((w) => w.branch === branch && w.path !== checkout?.path);
     if (holder) {
-      setSelectedCwd(holder.path);
+      selectMenuWorktree(project, holder.path, branchData!.worktrees);
       closeProjectMenu();
       return;
     }
     if (checkout?.branch === branch) {
-      setSelectedCwd(checkout.path);
+      // Already checked out: closing a background menu is not a workspace pick.
       closeProjectMenu();
       return;
     }
 
-    const cwd = checkout?.path ?? projectRoot;
+    const cwd = checkout?.path ?? project.root;
+    const operation = projectMenuLoadId.current;
     setWtSwitchingBranch(branch);
     worktreeActions.setError(null);
     let failure: string | null = null;
     try {
-      const res = await fetch("/api/worktrees", {
+      const res = await project.api.fetch("/api/worktrees", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ cwd, branch }),
       });
       const data = await res.json().catch(() => ({})) as { branch?: string; error?: string };
+      if (operation !== projectMenuLoadId.current) return;
       if (!res.ok || data.error || !data.branch) {
         failure = data.error ?? `HTTP ${res.status}`;
       } else {
-        setSelectedCwd(cwd);
+        // Changing a background checkout's branch is not a selection gesture.
         closeProjectMenu();
         setWtRefreshKey((k) => k + 1);
         void loadSessions(false);
@@ -846,29 +871,30 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     } finally {
       setWtSwitchingBranch(null);
     }
-    if (failure) {
-      // A native popup has already closed, so show git's answer in the DOM menu.
-      if (at) openDomProjectMenu(projectRoot, at, "branches", branchData ?? undefined);
+    if (failure && operation === projectMenuLoadId.current) {
+      if (at) openDomProjectMenu(project, at, "branches", branchData ?? undefined);
       worktreeActions.setError(failure);
     }
-  }, [closeProjectMenu, loadSessions, openDomProjectMenu, projectBranchMenu, selectedCwd, worktreeActions, wtSwitchingBranch]);
+  }, [closeProjectMenu, loadSessions, openDomProjectMenu, projectBranchMenu, remoteCurrentHost, selectedCwd, selectMenuWorktree, worktreeActions, wtSwitchingBranch]);
 
   // Clicking a session moves the effective cwd to that session's worktree.
   // Done on the click path (not via the selectedCwd prop sync) so it also
   // works when the prop value won't change — e.g. re-clicking the already
   // open session after manually switching worktrees.
-  const handleSelectSessionFromList = useCallback((s: SessionInfo, entryId?: string, blockIndex?: number) => {
+  const handleSelectSessionFromList = useCallback((s: HostedSessionInfo, entryId?: string, blockIndex?: number) => {
+    remoteClientStore.selectWorkspace(s.id, s.cwd, s.host ?? null);
     setAllSessions((current) => current.some((session) => session.id === s.id) ? current : [s, ...current]);
     if (s.cwd) setSelectedCwd(s.cwd);
     onSelectSession(s, false, entryId, blockIndex);
   }, [onSelectSession]);
 
-  const handleNewSession = useCallback((cwdOverride?: string) => {
+  const handleNewSession = useCallback((cwdOverride?: string, hostOverride?: string | null) => {
     const cwd = cwdOverride ?? selectedCwd;
+    const host = hostOverride === undefined ? remoteClientStore.currentHost : hostOverride;
     if (!cwd) return;
     // Creating a session is also the activation gesture for an archived
     // project. This keeps the archive list useful without a second step.
-    const projectRoot = projectRootFor(cwd) ?? cwd;
+    const projectRoot = hostedProjectKey(projectRootFor(cwd, host) ?? cwd, host);
     if (archivedProjectRoots.has(projectRoot)) {
       setArchivedProjectRoots((prev) => {
         const next = new Set(prev);
@@ -882,7 +908,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     const tempId = typeof crypto.randomUUID === "function"
       ? crypto.randomUUID()
       : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
-    onNewSession?.(tempId, cwd);
+    remoteClientStore.selectWorkspace(tempId, cwd, host);
+    onNewSession?.(tempId, cwd, host);
   }, [selectedCwd, archivedProjectRoots, onNewSession, projectRootFor]);
 
   const addLocalProject = useCallback(async () => {
@@ -902,13 +929,17 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   // Fork: "+" first asks where the folder lives (this computer / SSH host).
   const handleAddProject = useCallback(async (event?: React.MouseEvent<HTMLElement>) => {
     if (!event) return addLocalProject();
-    await openAddProjectMenu(event.currentTarget, t, { onLocal: () => void addLocalProject(), onPicked: activateProject });
-  }, [addLocalProject, activateProject, t]);
+    await openAddProjectMenu(event.currentTarget, t, {
+      onLocal: () => void addLocalProject(),
+      // The picker reports the host it browsed; never infer it from ambient state.
+      onPicked: (cwd, host) => activateHostedProject(cwd, host),
+    });
+  }, [addLocalProject, activateHostedProject, t]);
 
-  const archiveProject = useCallback((projectRoot: string) => {
+  const archiveProject = useCallback((project: ProjectMenuTarget) => {
     setArchivedProjectRoots((prev) => {
       const next = new Set(prev);
-      next.add(projectRoot);
+      next.add(hostedProjectKey(project.root, project.host));
       return next;
     });
     closeProjectMenu();
@@ -919,70 +950,79 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   // row's "…" visible) but `projectMenuPos` stays null, so the DOM menu never
   // renders — until a step needs it (openDomProjectMenu).
   const { setError: setWorktreeError, requestRemove: requestWorktreeRemoval } = worktreeActions;
-  const showNativeBranchMenu = useCallback(function showBranches(projectRoot: string, at: NativeMenuPoint): Promise<void> {
+  const showNativeBranchMenu = useCallback(function showBranches(project: ProjectMenuTarget, at: NativeMenuPoint): Promise<void> {
     return showNativeProjectBranchMenu({
-      projectRoot,
+      projectRoot: project.root,
+      request: project.api.fetch,
       at,
-      selectedCwd,
+      selectedCwd: project.host === remoteCurrentHost ? selectedCwd : null,
       switchingBranch: wtSwitchingBranch,
       t,
-      onSwitch: (root, branch, loaded) => void handleSwitchProjectBranch(root, branch, loaded, at),
+      onSwitch: (_root, branch, loaded) => void handleSwitchProjectBranch(project, branch, loaded, at),
       onFetch: (root) => void (async () => {
         try {
-          await fetchRemoteBranches(root);
-          await showBranches(root, at);
+          await fetchRemoteBranches(root, project.api.fetch);
+          await showBranches(project, at);
         } catch (e) {
-          openDomProjectMenu(root, at, "branches");
+          openDomProjectMenu(project, at, "branches");
           setWorktreeError(e instanceof Error ? e.message : String(e));
         }
       })(),
     });
-  }, [handleSwitchProjectBranch, openDomProjectMenu, selectedCwd, setWorktreeError, t, wtSwitchingBranch]);
+  }, [handleSwitchProjectBranch, openDomProjectMenu, remoteCurrentHost, selectedCwd, setWorktreeError, t, wtSwitchingBranch]);
 
-  const showNativeWorktreeMenu = useCallback((projectRoot: string, at: NativeMenuPoint) => showNativeProjectWorktreeMenu({
-    projectRoot,
+  const showNativeWorktreeMenu = useCallback((project: ProjectMenuTarget, at: NativeMenuPoint) => showNativeProjectWorktreeMenu({
+    projectRoot: project.root,
+    request: project.api.fetch,
     at,
-    selectedCwd,
+    selectedCwd: project.host === remoteCurrentHost ? selectedCwd : null,
     t,
-    onSelect: (path) => setSelectedCwd(path),
-    onNew: (root, point, loaded) => {
+    onSelect: (path, loaded) => selectMenuWorktree(project, path, loaded.worktrees),
+    onNew: (_root, point, loaded) => {
       resetWorktreeActions();
-      openDomProjectMenu(root, point, "new-worktree", loaded);
+      openDomProjectMenu(project, point, "new-worktree", loaded);
     },
-    onRemove: (root, path, point, loaded) => {
+    onRemove: (_root, path, point, loaded) => {
       resetWorktreeActions();
-      openDomProjectMenu(root, point, "worktrees", loaded);
+      openDomProjectMenu(project, point, "worktrees", loaded);
       requestWorktreeRemoval(path);
     },
-  }), [openDomProjectMenu, requestWorktreeRemoval, resetWorktreeActions, selectedCwd, t]);
+  }), [openDomProjectMenu, requestWorktreeRemoval, resetWorktreeActions, remoteCurrentHost, selectedCwd, selectMenuWorktree, t]);
 
-  const showNativeProjectMenu = useCallback(async (projectRoot: string, at: NativeMenuPoint): Promise<boolean> => {
-    setProjectMenu({ root: projectRoot });
+  const showNativeProjectMenu = useCallback(async (project: ProjectMenuTarget, at: NativeMenuPoint): Promise<boolean> => {
+    projectMenuLoadId.current++;
+    setProjectMenu(project);
     setProjectMenuPos(null);
     setProjectBranchMenu(null);
     setProjectRevealError(null);
     const shown = await showNativeMenu([
-      { label: `${t("sidebar.switchBranch")}…`, onSelect: () => void showNativeBranchMenu(projectRoot, at) },
-      { label: t("sidebar.worktrees"), onSelect: () => void showNativeWorktreeMenu(projectRoot, at) },
+      { label: `${t("sidebar.switchBranch")}…`, onSelect: () => void showNativeBranchMenu(project, at) },
+      { label: t("sidebar.worktrees"), onSelect: () => void showNativeWorktreeMenu(project, at) },
       ...(onOpenTerminal
-        ? [{ label: t("sidebar.openTerminalHere"), onSelect: () => onOpenTerminal(projectRoot) }]
+        ? [{ label: t("sidebar.openTerminalHere"), onSelect: () => onOpenTerminal(project.root, project.host) }]
         : []),
-      { label: revealProjectLabel, onSelect: () => void revealProjectInFileManager(projectRoot) },
+      ...(project.host === null
+        ? [{ label: revealProjectLabel, onSelect: () => void revealProjectInFileManager(project.root, project.host) }]
+        : []),
       { kind: "separator" as const },
-      { label: t("sidebar.archiveProject"), onSelect: () => archiveProject(projectRoot) },
+      { label: t("sidebar.archiveProject"), onSelect: () => archiveProject(project) },
     ], at);
-    setProjectMenu((current) => (current?.root === projectRoot ? null : current));
+    // A native choice may already have opened the DOM continuation. It owns
+    // a new target object and must not be dismissed by the parent popup.
+    setProjectMenu((current) => current === project ? null : current);
     return shown;
   }, [archiveProject, onOpenTerminal, revealProjectInFileManager, revealProjectLabel, showNativeBranchMenu, showNativeWorktreeMenu, t]);
 
-  const openProjectMenu = useCallback((e: React.MouseEvent<HTMLButtonElement>, projectRoot: string) => {
+  const openProjectMenu = useCallback((e: React.MouseEvent<HTMLButtonElement>, projectRoot: string, host: string | null) => {
     e.stopPropagation();
+    const project = projectMenuTarget(projectRoot, host);
+    projectMenuLoadId.current++;
     resetWorktreeActions();
     if (canUseNativeMenu()) {
-      void showNativeProjectMenu(projectRoot, menuPointBelow(e.currentTarget));
+      void showNativeProjectMenu(project, menuPointBelow(e.currentTarget));
       return;
     }
-    if (projectMenu?.root === projectRoot) {
+    if (sameProject(projectMenu, project)) {
       closeProjectMenu();
       return;
     }
@@ -993,7 +1033,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     const top = rect.bottom + menuHeight > window.innerHeight - 8
       ? rect.top - menuHeight - 4
       : rect.bottom + 4;
-    setProjectMenu({ root: projectRoot });
+    setProjectMenu(project);
     setProjectMenuPos({ top, left });
     setProjectBranchMenu(null);
     setProjectMenuView("actions");
@@ -1011,9 +1051,19 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         || session.firstMessage.toLowerCase().includes(trimmedSessionQuery))
     : treeSessions;
   const sessionFamilies = listSessionFamilies(filteredSessions);
-  const allProjects = groupByProject(filteredSessions, { runningIds: runningSessionIds, unreadIds: unreadSessionIds });
-  const activeProjects = allProjects.filter((group) => !archivedProjectRoots.has(group.projectRoot));
-  const projectDisplayNames = getProjectDisplayNames(activeProjects.map((group) => group.projectRoot));
+  const selectedProjectObject = projectFor(selectedCwd);
+  const pickedProjects = trimmedSessionQuery ? [] : [
+    ...remoteState.projects.filter((project) => !remoteState.hostsLoaded || remoteState.hosts.some((host) => host.id === project.host)),
+    // Keep a newly chosen local directory visible before its first session too.
+    ...(remoteCurrentHost === null && selectedCwd && selectedProjectObject ? [{
+      cwd: selectedCwd,
+      projectRoot: selectedProjectObject.root,
+      host: remoteCurrentHost,
+    }] : []),
+  ];
+  const allProjects = groupByProject(filteredSessions, { runningIds: runningSessionIds, unreadIds: unreadSessionIds, projects: pickedProjects });
+  const activeProjects = allProjects.filter((group) => !archivedProjectRoots.has(group.clientKey));
+  const projectDisplayNames = getProjectDisplayNames([...new Set(activeProjects.map((group) => group.projectRoot))]);
   const hasTodaySessions = !trimmedSessionQuery && hasRecallSessionsToday(treeSessions);
   const recentSessions = !trimmedSessionQuery
     ? getRecallSessions(treeSessions)
@@ -1022,11 +1072,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     const projectRoots = activeProjects.map((group) => group.projectRoot);
     onProjectsChange?.(projectRoots);
   }, [activeProjects, onProjectsChange]);
-  // Sessions of every worktree in the selected project are shown together
-  const selectedProjectObject = projectFor(selectedCwd);
-
   const renderProjectGroup = (group: ReturnType<typeof groupByProject>[number]) => {
-    const isCollapsed = !trimmedSessionQuery && collapsedProjects.has(group.projectRoot);
+    const isCollapsed = !trimmedSessionQuery && collapsedProjects.has(group.clientKey);
     // Fork: with SSH hosts the same path can be a project on two machines.
     const isActive = group.projectRoot === projectRootFor(selectedCwd)
       && (group.host ?? null) === remoteCurrentHost;
@@ -1034,7 +1081,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     const unreadCount = group.unreadIds.size;
     const groupTree = buildSessionTree(group.sessions);
     const showSessionOverflow = groupTree.length > MAX_VISIBLE_PROJECT_SESSIONS;
-    const isSessionOverflowExpanded = Boolean(trimmedSessionQuery) || expandedProjectSessions.has(group.projectRoot);
+    const isSessionOverflowExpanded = Boolean(trimmedSessionQuery) || expandedProjectSessions.has(group.clientKey);
     let visibleGroupTree = isSessionOverflowExpanded
       ? groupTree
       : groupTree.slice(0, MAX_VISIBLE_PROJECT_SESSIONS);
@@ -1056,21 +1103,20 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     const toggleCollapse = () => {
       setCollapsedProjects((prev) => {
         const next = new Set(prev);
-        if (next.has(group.projectRoot)) next.delete(group.projectRoot);
-        else next.add(group.projectRoot);
+        if (next.has(group.clientKey)) next.delete(group.clientKey);
+        else next.add(group.clientKey);
         return next;
       });
       if (!isActive) {
-        remoteClientStore.pinProjectHost(group.projectRoot, group.host ?? null);
-        setSelectedCwd(group.projectRoot);
+        selectProjectCwd(group.projectRoot, group.host ?? null);
       }
     };
 
-    const isMenuOpen = projectMenu?.root === group.projectRoot;
+    const isMenuOpen = sameProject(projectMenu, { root: group.projectRoot, host: group.host });
     const rowTitle = branchSubtitle ? `${group.projectRoot} · ${branchSubtitle}` : group.projectRoot;
 
     return (
-      <div key={group.host ? `${group.host}:${group.projectRoot}` : group.projectRoot} className={`sidebar-project-tree-group${isCollapsed ? " is-collapsed" : ""}${isActive ? " is-active" : ""}`}>
+      <div key={group.clientKey} data-project-key={group.clientKey} className={`sidebar-project-tree-group${isCollapsed ? " is-collapsed" : ""}${isActive ? " is-active" : ""}`}>
         <div className={`sidebar-project-tree-row${isMenuOpen ? " is-menu-open" : ""}`}>
           <button
             type="button"
@@ -1097,7 +1143,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             <span className="sidebar-project-tree-name">
               {projectDisplayNames.get(group.projectRoot) ?? group.displayName}
             </span>
-            <RemoteProjectBadge projectRoot={group.projectRoot} sessions={group.sessions} />
+            <RemoteProjectBadge host={group.host ?? null} />
             {/* A folded project hides its rows, so the count (and any running
                 or unread chips) must stay readable on the header itself. */}
             {isCollapsed && (
@@ -1126,7 +1172,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             <button
               type="button"
               className="sidebar-project-tree-action"
-              onClick={() => handleNewSession(group.projectRoot)}
+              onClick={() => handleNewSession(group.projectRoot, group.host ?? null)}
               title={t("sidebar.newSessionTitle", { path: group.projectRoot })}
               aria-label={t("sidebar.newSessionTitle", { path: group.projectRoot })}
             >
@@ -1138,7 +1184,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             <button
               type="button"
               className="sidebar-project-tree-action sidebar-project-tree-more"
-              onClick={(e) => openProjectMenu(e, group.projectRoot)}
+              onClick={(e) => openProjectMenu(e, group.projectRoot, group.host ?? null)}
               title={t("sidebar.moreActions")}
               aria-label={t("sidebar.moreActions")}
               aria-expanded={isMenuOpen}
@@ -1180,8 +1226,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                 className="sidebar-project-tree-show-more"
                 onClick={() => setExpandedProjectSessions((prev) => {
                   const next = new Set(prev);
-                  if (next.has(group.projectRoot)) next.delete(group.projectRoot);
-                  else next.add(group.projectRoot);
+                  if (next.has(group.clientKey)) next.delete(group.clientKey);
+                  else next.add(group.clientKey);
                   return next;
                 })}
               >
@@ -1374,8 +1420,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                 title={t("sidebar.moreActions")}
                 aria-label={t("sidebar.moreActions")}
                 onClick={() => {
-                  if (allProjects.some((g) => !collapsedProjects.has(g.projectRoot))) {
-                    setCollapsedProjects(new Set(allProjects.map((g) => g.projectRoot)));
+                  if (allProjects.some((g) => !collapsedProjects.has(g.clientKey))) {
+                    setCollapsedProjects(new Set(allProjects.map((g) => g.clientKey)));
                   } else {
                     setCollapsedProjects(new Set());
                   }
@@ -1413,32 +1459,32 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
           view={projectMenuView}
           branchMenu={projectBranchMenu}
           branchLoading={projectBranchLoading}
-          selectedCwd={selectedCwd}
+          selectedCwd={projectMenu.host === remoteCurrentHost ? selectedCwd : null}
           switchingBranch={wtSwitchingBranch}
           fetching={worktreeActions.fetching}
           worktreeBusy={worktreeActions.busy}
           worktreeError={worktreeActions.error}
           confirmRemove={worktreeActions.confirmRemove}
           newBranch={worktreeActions.newBranch}
-          canReveal={(isTauriDesktop() || fileManagerAvailability?.supported === true) && canUseNativeFileActions(projectMenu.root)}
+          canReveal={(isTauriDesktop() || fileManagerAvailability?.supported === true) && projectMenu.host === null}
           revealLabel={revealProjectLabel}
           projectRevealError={projectRevealError}
           t={t}
-          onShowBranches={() => showProjectMenuView(projectMenu.root, "branches")}
-          onShowWorktrees={() => showProjectMenuView(projectMenu.root, "worktrees")}
-          onShowNewWorktree={() => showProjectMenuView(projectMenu.root, "new-worktree")}
-          onBackToActions={() => showProjectMenuView(projectMenu.root, "actions")}
+          onShowBranches={() => showProjectMenuView(projectMenu, "branches")}
+          onShowWorktrees={() => showProjectMenuView(projectMenu, "worktrees")}
+          onShowNewWorktree={() => showProjectMenuView(projectMenu, "new-worktree")}
+          onBackToActions={() => showProjectMenuView(projectMenu, "actions")}
           onOpenTerminal={onOpenTerminal ? () => {
-            const cwd = projectMenu.root;
+            const { root, host } = projectMenu;
             closeProjectMenu();
-            onOpenTerminal(cwd);
+            onOpenTerminal(root, host);
           } : undefined}
-          onReveal={() => void revealProjectInFileManager(projectMenu.root)}
-          onArchive={() => archiveProject(projectMenu.root)}
-          onSwitchBranch={(branch) => void handleSwitchProjectBranch(projectMenu.root, branch)}
+          onReveal={() => void revealProjectInFileManager(projectMenu.root, projectMenu.host)}
+          onArchive={() => archiveProject(projectMenu)}
+          onSwitchBranch={(branch) => void handleSwitchProjectBranch(projectMenu, branch)}
           onFetch={() => void worktreeActions.fetchBranches(projectMenu.root)}
           onSelectWorktree={(path) => {
-            setSelectedCwd(path);
+            selectMenuWorktree(projectMenu, path, projectBranchMenu?.worktrees ?? []);
             closeProjectMenu();
           }}
           onRequestRemove={worktreeActions.requestRemove}
@@ -1451,17 +1497,19 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       {projectPickerOpen && (
         <div className="project-picker-modal-overlay" role="dialog" aria-modal="true" onClick={() => setProjectPickerOpen(false)}>
           <div className="project-picker-modal-shell" onClick={(e) => e.stopPropagation()}>
-            <ProjectPicker
-              recentProjects={recentProjects}
-              selectedCwd={selectedCwdProp ?? null}
-              selectedProject={selectedProjectObject?.root ?? null}
-              homeDir={homeDir}
-              onSelectCwd={(cwd) => {
-                activateProject(cwd);
-                setProjectPickerOpen(false);
-              }}
-              variant="block"
-            />
+            <BackendScopeProvider host={null}>
+              <ProjectPicker
+                recentProjects={recentProjects}
+                selectedCwd={remoteCurrentHost === null ? selectedCwdProp ?? null : null}
+                selectedProject={remoteCurrentHost === null ? selectedProjectObject?.root ?? null : null}
+                homeDir={homeDir}
+                onSelectCwd={(cwd) => {
+                  activateProject(cwd);
+                  setProjectPickerOpen(false);
+                }}
+                variant="block"
+              />
+            </BackendScopeProvider>
           </div>
         </div>
       )}

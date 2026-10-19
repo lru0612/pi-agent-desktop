@@ -178,7 +178,9 @@ test("folded projects persist across reloads", () => {
   assert.match(source, /getPrefJson<unknown>\(APP_PREF_KEYS\.collapsedProjects\)/);
   assert.match(source, /setPrefJson\(APP_PREF_KEYS\.collapsedProjects, \[\.\.\.collapsedProjects\]\)/);
   // "Collapse all" must look at the visible projects, not the stored set's size.
-  assert.match(source, /allProjects\.some\(\(g\) => !collapsedProjects\.has\(g\.projectRoot\)\)/);
+  assert.match(source, /allProjects\.some\(\(g\) => !collapsedProjects\.has\(g\.clientKey\)\)/);
+  assert.match(source, /setCollapsedProjects\(new Set\(allProjects\.map\(\(g\) => g\.clientKey\)\)\)/);
+  assert.doesNotMatch(source, /collapsedProjects\.has\(group\.projectRoot\)/);
 });
 
 test("expanded session previews persist and reveal how many rows are hidden", () => {

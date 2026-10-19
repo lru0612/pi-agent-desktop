@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { useI18n } from "@/hooks/useI18n";
 import { useTheme } from "@/hooks/useTheme";
 import { useDiffViewMode } from "@/hooks/useDiffViewMode";
@@ -41,6 +41,7 @@ import { McpConfig } from "./McpConfig";
 import { ConfigButton, ConfigSwitch } from "./SettingsUi";
 import { ArtifactsSettingRow } from "./ArtifactsSettingRow";
 import { useRemoteConfigScope } from "@/components/remote/RemoteIntegration";
+import { BackendScopeProvider, useBackendApi } from "./remote/BackendScope";
 
 interface Props {
   cwd: string | null;
@@ -95,6 +96,13 @@ function GeneralSettings({
 }: Pick<Props, "sessionId" | "onSessionReloaded" | "quoteSelectionEnabled" | "onQuoteSelectionChange" | "soundEnabled" | "onSoundToggle"> & {
   onBusyChange: (busy: boolean) => void;
 }) {
+  const { fetch, host } = useBackendApi();
+  const remote = host != null;
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
   const { locale, setLocale, supportedLocales, t } = useI18n();
   const { preference, setThemePreference } = useTheme();
   const { mode: diffViewMode, setMode: setDiffViewMode } = useDiffViewMode();
@@ -112,12 +120,13 @@ function GeneralSettings({
   const [customCssError, setCustomCssError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (remote) return;
     setThinkingExpanded(isThinkingExpandedByDefault());
     void fetch("/api/web-auth")
       .then((response) => response.ok ? response.json() : null)
       .then((data: { enabled?: boolean } | null) => setWebAuthEnabled(data?.enabled === true))
       .catch(() => {});
-  }, []);
+  }, [fetch, remote]);
 
   const logOut = async () => {
     setLoggingOut(true);
@@ -145,7 +154,7 @@ function GeneralSettings({
         if (!cancelled) setShellError(cause instanceof Error ? cause.message : String(cause));
       });
     return () => { cancelled = true; };
-  }, []);
+  }, [fetch]);
 
   const togglePowerShell = async (enabled: boolean) => {
     setShellSaving(true);
@@ -159,9 +168,9 @@ function GeneralSettings({
       const data = await response.json() as ToolSettingsResponse & { error?: string };
       if (!response.ok || data.error) throw new Error(data.error ?? `HTTP ${response.status}`);
       setShellSettings(data);
-      if (sessionId) {
+      if (sessionId && mountedRef.current) {
         await sendAgentCommand(sessionId, { type: "reload" });
-        onSessionReloaded();
+        if (mountedRef.current) onSessionReloaded();
       }
     } catch (cause) {
       setShellError(cause instanceof Error ? cause.message : String(cause));
@@ -197,9 +206,10 @@ function GeneralSettings({
             <p className="settings-general-tagline">{t("appSettings.tagline", { product: PRODUCT_NAME })}</p>
             <p className="settings-general-tagline">{t("appSettings.taglineDetails")}</p>
           </section>
-          <AppUpdatesSection onBusyChange={onBusyChange} />
+          {/* App updates and UI preferences always belong to this computer. */}
+          {!remote && <AppUpdatesSection onBusyChange={onBusyChange} />}
 
-          <section className="settings-general-section">
+          {!remote && <section className="settings-general-section">
             <h3 className="settings-general-heading">{t("common.language")}</h3>
             <div role="radiogroup" aria-label={t("common.language")} className="settings-language-options">
               {supportedLocales.map((plugin) => {
@@ -222,11 +232,12 @@ function GeneralSettings({
                 );
               })}
             </div>
-          </section>
+          </section>}
 
           <section className="settings-general-section">
             <h3 className="settings-general-heading">{t("settings.chat")}</h3>
             <div className="settings-chat-options">
+              {!remote && <>
               <div className="settings-chat-option settings-chat-switch-option">
                 <span>{t("settings.thinkingExpandedDefault")}</span>
                 <ConfigSwitch
@@ -310,7 +321,9 @@ function GeneralSettings({
                   onChange={(enabled) => { if (enabled !== soundEnabled) onSoundToggle(); }}
                 />
               </div>
+              </>}
               <ArtifactsSettingRow />
+              {!remote && <>
               <div className="settings-chat-option settings-chat-switch-option" role="radiogroup" aria-label={t("settings.enterSendMode")}>
                 <span>{t("settings.enterSendMode")}</span>
                 <div className="settings-send-mode-options">
@@ -361,12 +374,13 @@ function GeneralSettings({
                   </button>
                 </div>
               </div>
+              </>}
             </div>
           </section>
         </div>
 
         <div className="settings-general-col">
-          <section className="settings-general-section">
+          {!remote && <section className="settings-general-section">
             <h3 className="settings-general-heading">{t("settings.appearance")}</h3>
             <div role="radiogroup" aria-label={t("settings.appearance")} className="settings-theme-options">
               {THEME_OPTIONS.map((option) => {
@@ -410,9 +424,9 @@ function GeneralSettings({
               </div>
             </div>
             {customCssError && <p role="alert" className="settings-general-error">{customCssError}</p>}
-          </section>
+          </section>}
 
-          <DesktopAppSection />
+          {!remote && <DesktopAppSection />}
 
           {shellSettings?.isWindows && (
             <section className="settings-general-section">
@@ -431,7 +445,7 @@ function GeneralSettings({
             </section>
           )}
 
-          {webAuthEnabled && (
+          {!remote && webAuthEnabled && (
             <section className="settings-general-section">
               <ConfigButton variant="secondary" disabled={loggingOut} onClick={() => void logOut()}>
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -459,7 +473,7 @@ export const SETTINGS_SECTION_ITEMS: { id: SettingsSection; labelKey: string; re
 
 export function SettingsPanel({
   cwd: workspaceCwd,
-  sessionId,
+  sessionId: workspaceSessionId,
   initialSection,
   onClose,
   onSessionReloaded,
@@ -467,15 +481,20 @@ export function SettingsPanel({
   onQuoteSelectionChange,
   soundEnabled,
   onSoundToggle,
-  projectTrust,
-  onOpenTrustDialog,
-  onProjectTrustChanged,
+  projectTrust: workspaceTrust,
+  onOpenTrustDialog: openWorkspaceTrustDialog,
+  onProjectTrustChanged: onWorkspaceTrustChanged,
 }: Props) {
   const { t } = useI18n();
   // Fork: which backend's configuration the sections show (local / SSH host).
   // The project only applies when it lives on that backend.
-  const remoteScope = useRemoteConfigScope(workspaceCwd);
+  const [busy, setBusy] = useState(false);
+  const remoteScope = useRemoteConfigScope(workspaceCwd, busy);
   const cwd = remoteScope.cwdApplies ? workspaceCwd : null;
+  const sessionId = remoteScope.cwdApplies ? workspaceSessionId : null;
+  const projectTrust = cwd ? workspaceTrust : undefined;
+  const onOpenTrustDialog = cwd ? openWorkspaceTrustDialog : undefined;
+  const onProjectTrustChanged = cwd ? onWorkspaceTrustChanged : undefined;
   const [section, setSection] = useState<SettingsSection>(initialSection);
   const [mountedSections, setMountedSections] = useState<ReadonlySet<SettingsSection>>(
     () => new Set([section]),
@@ -488,8 +507,7 @@ export function SettingsPanel({
   }));
   const sectionRequiresProject = settingsSectionRequiresProject(section);
   // A signed desktop update installs and relaunches the app; the dialog must not
-  // be dismissible from under it (the Version & Updates block reports the phase).
-  const [busy, setBusy] = useState(false);
+  // be dismissible or switch backend from under it (see busy above).
 
   useEffect(() => setLastSettingsSection(initialSection), [initialSection]);
 
@@ -580,12 +598,12 @@ export function SettingsPanel({
               );
             })}
           </nav>
-          <button type="button" onClick={onClose} title={t("i18n.close")} aria-label={t("i18n.close")} className="config-close-button settings-dialog-close">×</button>
+          <button type="button" disabled={busy} onClick={onClose} title={t("i18n.close")} aria-label={t("i18n.close")} className="config-close-button settings-dialog-close">×</button>
         </div>
 
         <main className="settings-dialog-main">
           {/* Fork: switching the settings scope remounts every section. */}
-          <Fragment key={remoteScope.scopeKey}>
+          <BackendScopeProvider key={remoteScope.scopeKey} host={remoteScope.host}>
           {sectionHost("general", <GeneralSettings sessionId={sessionId} onSessionReloaded={onSessionReloaded} quoteSelectionEnabled={quoteSelectionEnabled} onQuoteSelectionChange={onQuoteSelectionChange} soundEnabled={soundEnabled} onSoundToggle={onSoundToggle} onBusyChange={setBusy} />)}
           {sectionHost("models", <ModelsConfig embedded cwd={cwd} onClose={onClose} onOpenMcp={() => activateSection("mcp")} />)}
           {/* Visited sections stay mounted, so the ones whose answer depends on trust take the page's
@@ -595,7 +613,7 @@ export function SettingsPanel({
           {cwd && sectionHost("plugins", <PluginsConfig embedded key={cwd} cwd={cwd} sessionId={sessionId} trust={projectTrust} onClose={onClose} onReloaded={onSessionReloaded} />)}
           {/* No project needed: the global mcp.json is listed alone, and a project adds its group. */}
           {sectionHost("mcp", <McpConfig embedded key={cwd ?? ""} cwd={cwd} trust={projectTrust} onTrustProject={onOpenTrustDialog} onProjectTrustChanged={onProjectTrustChanged} onClose={onClose} />)}
-          </Fragment>
+          </BackendScopeProvider>
         </main>
       </div>
     </div>

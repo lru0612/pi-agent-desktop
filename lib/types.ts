@@ -386,6 +386,8 @@ export interface SessionTreeNode {
 }
 
 export interface SessionInfo {
+  /** Client-side backend identity; absent for sessions on this computer. */
+  host?: string;
   path: string;
   id: string;
   cwd: string;

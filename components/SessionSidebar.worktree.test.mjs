@@ -12,7 +12,9 @@ test("uses the server-resolved current worktree identity", () => {
   );
   // Removing the selected worktree falls back to the project root, matched by
   // the server-resolved path (the project menu's worktree page).
-  assert.match(source, /if \(currentWorktreePath === path \|\| selectedCwd === path\) setSelectedCwd\(projectRoot\)/);
+  assert.match(source, /if \(currentWorktreePath === path \|\| selectedCwd === path\) selectProjectCwd\(projectRoot, projectMenu\.host\)/);
+  assert.match(source, /remoteClientStore\.currentHost === projectMenu\.host/);
+  assert.match(source, /const \{ cwd: selectedCwd, currentWorktreePath \} = selectedWorkspaceRef\.current/);
   // The active project's branch subtitle reads the same identity.
   assert.match(source, /const currentWt = currentWorktree \?\? null;/);
   assert.doesNotMatch(source, /const isCurrent = wt\.path === selectedCwd/);

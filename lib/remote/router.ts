@@ -3,6 +3,7 @@
  * Kept free of browser globals so it is unit-testable in Node.
  */
 import { classifyApiPath, type RouteClass } from "./route-classes.ts";
+import { LOCAL_BACKEND_QUERY } from "./scoped-api.ts";
 
 export interface RouterStateView {
   /** Host owning a path: string = remote host, null = local, undefined = unknown. */
@@ -11,10 +12,6 @@ export interface RouterStateView {
   hostOfTerminal(id: string): string | null | undefined;
   /** Backend of the selected workspace (null = local). */
   currentHost: string | null;
-  /** Settings scope: undefined = follow the workspace, null = local, string = host. */
-  configHost: string | null | undefined;
-  /** Host whose directories the "add project" picker is browsing (null = local). */
-  browseHost: string | null;
 }
 
 export interface RouteDecision {
@@ -34,23 +31,12 @@ function passthrough(url: string): RouteDecision {
 
 /** `cwd` from a JSON request body, if any. */
 export function bodyCwd(body: unknown): string | undefined {
-  if (typeof body !== "string" || !body.startsWith("{")) return undefined;
+  if (typeof body !== "string" || !body.trimStart().startsWith("{")) return undefined;
   try {
     const parsed = JSON.parse(body) as { cwd?: unknown };
     return typeof parsed.cwd === "string" && parsed.cwd ? parsed.cwd : undefined;
   } catch {
     return undefined;
-  }
-}
-
-/** Remove `cwd` from a JSON body string. */
-export function stripCwdFromJsonBody(body: string): string {
-  try {
-    const parsed = JSON.parse(body) as Record<string, unknown>;
-    delete parsed.cwd;
-    return JSON.stringify(parsed);
-  } catch {
-    return body;
   }
 }
 
@@ -66,13 +52,18 @@ export function resolveApiRequest(
   } catch {
     return passthrough(rawUrl);
   }
-  if (url.origin !== origin) return passthrough(rawUrl);
-  if (!url.pathname.startsWith("/api/") || url.pathname.startsWith("/api/r/")) return passthrough(rawUrl);
+  if (url.origin !== origin || !url.pathname.startsWith("/api/")) return passthrough(rawUrl);
+  if (url.pathname.startsWith("/api/r/")) {
+    const host = url.pathname.split("/")[3];
+    return { ...passthrough(rawUrl), host: host ? decodeURIComponent(host) : null };
+  }
+  if (url.searchParams.get(LOCAL_BACKEND_QUERY) === "local") {
+    url.searchParams.delete(LOCAL_BACKEND_QUERY);
+    return { url: `${url.pathname}${url.search}`, changed: true, host: null, kind: "local", stripBodyCwd: false };
+  }
 
   const cls = classifyApiPath(url.pathname);
   let host: string | null;
-  let stripBodyCwd = false;
-  let queryCwdStripped = false;
 
   switch (cls.kind) {
     case "local":
@@ -92,50 +83,38 @@ export function resolveApiRequest(
       break;
     }
     case "path": {
-      const owner = state.ownerOfPath(cls.path);
+      // A transcript may refer to /tmp/output on either machine; its source
+      // session is authoritative, not another project's overlapping root.
+      const sourceSession = url.searchParams.get("sessionId");
+      const sourceHost = sourceSession ? state.hostOfSession(sourceSession) : undefined;
+      const owner = sourceHost !== undefined ? sourceHost : state.ownerOfPath(cls.path);
       host = owner !== undefined ? owner : state.currentHost;
       break;
     }
     case "cwd": {
       const cwd = url.searchParams.get("cwd") ?? bodyCwd(body);
       const owner = cwd ? state.ownerOfPath(cwd) : undefined;
-      if (owner !== undefined) host = owner;
-      else host = cls.fallback === "workspace" ? state.currentHost : state.browseHost;
+      // An unqualified folder picker is local. Remote pickers have an
+      // explicit /api/r/<host>/ prefix, even when both machines share a path.
+      if (cls.fallback === "local") host = null;
+      else host = owner !== undefined ? owner : state.currentHost;
       break;
     }
     case "config": {
+      // Settings use a BackendScopeProvider and explicit URLs. Changing a
+      // settings dropdown must never redirect background composer requests.
       const cwd = url.searchParams.get("cwd") ?? bodyCwd(body);
-      if (state.configHost !== undefined) {
-        host = state.configHost;
-        if (cwd) {
-          const owner = state.ownerOfPath(cwd);
-          const cwdHost = owner !== undefined ? owner : state.currentHost;
-          if (cwdHost !== host) {
-            // The project path means nothing on the chosen host: ask for its
-            // global configuration instead.
-            queryCwdStripped = url.searchParams.has("cwd");
-            url.searchParams.delete("cwd");
-            stripBodyCwd = bodyCwd(body) !== undefined;
-          }
-        }
-      } else if (cwd) {
-        const owner = state.ownerOfPath(cwd);
-        host = owner !== undefined ? owner : state.currentHost;
-      } else {
-        host = state.currentHost;
-      }
+      const owner = cwd ? state.ownerOfPath(cwd) : undefined;
+      host = owner !== undefined ? owner : state.currentHost;
       break;
     }
     case "browse":
-      host = state.browseHost;
+      host = null;
       break;
   }
 
   const search = url.search;
-  if (host === null) {
-    if (!queryCwdStripped && !stripBodyCwd) return { ...passthrough(rawUrl), kind: cls.kind };
-    return { url: `${url.pathname}${search}`, changed: true, host: null, kind: cls.kind, stripBodyCwd };
-  }
+  if (host === null) return { ...passthrough(rawUrl), kind: cls.kind };
   const target = `/api/r/${encodeURIComponent(host)}${url.pathname.slice("/api".length)}${search}`;
-  return { url: target, changed: true, host, kind: cls.kind, stripBodyCwd };
+  return { url: target, changed: true, host, kind: cls.kind, stripBodyCwd: false };
 }

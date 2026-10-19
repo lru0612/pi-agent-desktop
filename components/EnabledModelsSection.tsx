@@ -10,6 +10,7 @@ import {
   findProviderView,
   isLastEnabledModel,
 } from "./enabled-models-helpers";
+import { useBackendApi } from "./remote/BackendScope";
 import { ConfigButton, ConfigSwitch } from "./SettingsUi";
 
 /**
@@ -74,6 +75,7 @@ const FAILURE_KEYS: Record<string, string> = {
 };
 
 export function useEnabledModels(cwd?: string | null): EnabledModelsController {
+  const { fetch } = useBackendApi();
   const [view, setView] = useState<EnabledModelsView | null>(null);
   const [loading, setLoading] = useState(true);
   const [pending, setPending] = useState<string | null>(null);
@@ -103,7 +105,7 @@ export function useEnabledModels(cwd?: string | null): EnabledModelsController {
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [cwd, reloadKey]);
+  }, [cwd, fetch, reloadKey]);
 
   const mutate = useCallback((key: string, body: MutationBody) => {
     // A save can land while a switch is still in flight; queue it rather than
@@ -139,7 +141,7 @@ export function useEnabledModels(cwd?: string | null): EnabledModelsController {
         if (queued) mutateRef.current?.(queued.key, queued.body);
       }
     })();
-  }, [cwd]);
+  }, [cwd, fetch]);
 
   mutateRef.current = mutate;
 
@@ -323,6 +325,7 @@ export function EnabledModelsProviderSwitchNote({
  * The button is the whole feature: nothing refreshes catalogs on its own.
  */
 function useCatalogRefresh(providerId: string, onChanged: () => void) {
+  const { fetch } = useBackendApi();
   const [refreshing, setRefreshing] = useState(false);
   const [note, setNote] = useState<string | null>(null);
 
@@ -353,7 +356,7 @@ function useCatalogRefresh(providerId: string, onChanged: () => void) {
         setRefreshing(false);
       }
     })();
-  }, [providerId, onChanged]);
+  }, [fetch, providerId, onChanged]);
 
   return { refreshing, note, refresh };
 }

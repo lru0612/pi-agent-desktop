@@ -4,6 +4,10 @@ import { stripTypeScriptTypes } from "node:module";
 import test from "node:test";
 import vm from "node:vm";
 import { createJiti } from "jiti";
+import { hostedProjectKey } from "../lib/remote/project-identity.ts";
+import { newWorkspaceDraft, parkedWorkspaceDraft, workspaceNavigation } from "../lib/remote/navigation.ts";
+import { RemoteClientStore } from "../lib/remote/client-store.ts";
+import { workspaceKeyOf } from "../lib/workspace-memory.ts";
 
 const source = await readFile(new URL("./AppShell.tsx", import.meta.url), "utf8");
 const jiti = createJiti(import.meta.url);
@@ -35,7 +39,7 @@ test("explicit context changes invalidate a pending workspace restore", () => {
 test("all active-session transitions share one persistence effect", () => {
   assert.match(
     source,
-    /useEffect\(\(\) => \{\s+if \(selectedSession\) \{[\s\S]*?setLastOpenSession\(projectKey, selectedSession\.id\);\s+setTabOpenSession\(selectedSession\.id\);\s+return;\s+\}\s+if \(newSessionCwd\) setTabOpenNewSession\(newSessionCwd\);\s+\}, \[newSessionCwd, selectedSession\]\);/,
+    /useEffect\(\(\) => \{\s+if \(selectedSession\) \{[\s\S]*?setLastOpenSession\(projectKey, selectedSession\.id\);\s+setTabOpenSession\(selectedSession\.id, undefined, selectedSession\.host \?\? workspaceHost\);\s+return;\s+\}\s+if \(newSessionCwd\) setTabOpenNewSession\(newSessionCwd, undefined, workspaceHost\);\s+\}, \[newSessionCwd, selectedSession, workspaceHost\]\);/,
   );
 });
 
@@ -66,10 +70,18 @@ test("New restores the draft after session navigation and workspace auto-restore
   const cleanupStart = hookSource.indexOf("    return () => {", hookSource.indexOf("  // Load session on mount"));
   const cleanupEnd = hookSource.indexOf("    // eslint-disable-next-line", cleanupStart);
 
-  for (const rememberedCwd of ["/draft-project", "/draft-project-worktree"]) {
-    await t.test(`remembered session cwd: ${rememberedCwd}`, async () => {
+  for (const { rememberedCwd, host } of [
+    { rememberedCwd: "/draft-project", host: null },
+    { rememberedCwd: "/draft-project-worktree", host: null },
+    { rememberedCwd: "/draft-project", host: "devbox" },
+    { rememberedCwd: "/draft-project-worktree", host: "devbox" },
+  ]) {
+    await t.test(`remembered session cwd: ${host ?? "local"}:${rememberedCwd}`, async () => {
       const cwd = "/draft-project";
-      const session = { id: "remembered", cwd: rememberedCwd, projectKey: cwd };
+      const session = { id: "remembered", cwd: rememberedCwd, projectKey: cwd, host: host ?? undefined };
+      const remoteClientStore = new RemoteClientStore();
+      remoteClientStore.recordSessions([session]);
+      remoteClientStore.selectWorkspace(null, cwd, host);
       const response = Promise.withResolvers();
       const context = vm.createContext({
         ...draftStore,
@@ -79,17 +91,23 @@ test("New restores the draft after session navigation and workspace auto-restore
         window: { location: { pathname: "/", search: "" } },
         router: { replace() {} },
         fetch: () => response.promise,
-        getLastOpenSession: (key) => key === cwd ? session.id : null,
+        getLastOpenSession: (key) => key === hostedProjectKey(cwd, host) ? session.id : null,
         clearLastOpen() {},
-        workspaceKeyOf: (value) => value.projectKey ?? value.cwd,
+        workspaceKeyOf,
+        hostedProjectKey,
+        newWorkspaceDraft,
+        parkedWorkspaceDraft,
+        workspaceNavigation,
+        remoteClientStore,
+        activeBackendRef: { current: host },
         useCallback: (callback) => callback,
         useGlobalKeyboardShortcuts() {},
         useNativeAppMenu() {},
         handleRightPanelClose() {},
         rightPanelOpen: false,
-        activeNewSessionDraftKeyRef: { current: `new:initial:${cwd}` },
+        activeNewSessionDraftKeyRef: { current: newWorkspaceDraft("initial", cwd, host) },
         scheduledOpenRef: { current: false },
-        activeProjectKeyRef: { current: cwd },
+        activeProjectKeyRef: { current: hostedProjectKey(cwd, host) },
         workspaceRestoreTokenRef: { current: 0 },
         suppressCwdBumpRef: { current: false },
         branchLeafChangeFnRef: { current: null },
@@ -110,6 +128,10 @@ test("New restores the draft after session navigation and workspace auto-restore
         sessionCatalog: [],
         sessionKey: 0,
       });
+      context.selectBackend = (id, path, nextHost) => {
+        context.activeBackendRef.current = nextHost;
+        remoteClientStore.selectWorkspace(id, path, nextHost);
+      };
       context.invalidateWorkspaceRestore = () => context.workspaceRestoreTokenRef.current++;
       for (const [setter] of callbacks.matchAll(/\bset[A-Z]\w*(?=\()/g)) {
         const state = setter[3].toLowerCase() + setter.slice(4);
@@ -143,7 +165,7 @@ test("New restores the draft after session navigation and workspace auto-restore
           cleanup();
           mountedKey = context.sessionKey;
           const activeCwd = context.newSessionCwd ?? context.activeCwd;
-          const key = context.selectedSession ? null : `new:${context.newSessionDraftId}:${activeCwd}`;
+          const key = context.selectedSession ? null : newWorkspaceDraft(context.newSessionDraftId, activeCwd, context.activeBackendRef.current);
           context.activeNewSessionDraftKeyRef.current = key;
           cleanup = makeCleanup(!context.selectedSession, key);
         }

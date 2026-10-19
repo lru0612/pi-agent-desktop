@@ -2,6 +2,7 @@
 
 import { useEffect, useId, useMemo, useState, type FormEvent } from "react";
 import { useI18n } from "@/hooks/useI18n";
+import { useBackendApi } from "@/components/remote/BackendScope";
 import { apiErrorText, scheduledApi, type CronPreview, type TaskInput } from "@/lib/scheduled-tasks/client";
 import {
   DEFAULT_PRESET,
@@ -162,6 +163,7 @@ function buildInput(form: FormState, timezone: string, original: ScheduledTaskVi
  * knows, so a path that is still being typed simply keeps the previous list.
  */
 function useModelOptions(cwd: string): ModelOption[] {
+  const { fetch } = useBackendApi();
   const [models, setModels] = useState<ModelOption[]>([]);
   useEffect(() => {
     if (!cwd.trim()) return;
@@ -175,7 +177,7 @@ function useModelOptions(cwd: string): ModelOption[] {
         .catch(() => undefined);
     }, 400);
     return () => { cancelled = true; clearTimeout(timer); };
-  }, [cwd]);
+  }, [cwd, fetch]);
   return models;
 }
 
@@ -184,6 +186,7 @@ function useModelOptions(cwd: string): ModelOption[] {
  * A run cannot ask, so it simply starts without them; the form says so up front.
  */
 function useUntrustedProject(cwd: string): boolean {
+  const { fetch } = useBackendApi();
   const [untrusted, setUntrusted] = useState(false);
   useEffect(() => {
     if (!cwd.trim()) return;
@@ -197,7 +200,7 @@ function useUntrustedProject(cwd: string): boolean {
         .catch(() => { if (!cancelled) setUntrusted(false); });
     }, 400);
     return () => { cancelled = true; clearTimeout(timer); };
-  }, [cwd]);
+  }, [cwd, fetch]);
   return untrusted && Boolean(cwd.trim());
 }
 

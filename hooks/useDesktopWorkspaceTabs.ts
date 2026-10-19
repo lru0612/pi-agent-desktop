@@ -8,12 +8,14 @@ import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
 import { APP_PREF_KEYS, setPrefJson } from "@/lib/app-prefs";
 import { workspaceFileTabsMatchContext, type PersistedWorkspace } from "@/lib/workspace-state";
 import type { Tab } from "@/components/TabBar";
+import { hostedProjectKey } from "@/lib/remote/project-identity";
 
 interface UseDesktopWorkspaceTabsOptions {
   desktopMode: boolean;
   initialSessionRestored: boolean;
   persistedWorkspace: PersistedWorkspace | null;
   sessionId: string | null;
+  host?: string | null;
   /** The selected session's cwd, else the new-session or active cwd. */
   cwd: string | null;
   showPlaceholder: boolean;
@@ -26,7 +28,7 @@ interface UseDesktopWorkspaceTabsOptions {
 }
 
 export function useDesktopWorkspaceTabs({
-  desktopMode, initialSessionRestored, persistedWorkspace, sessionId, cwd, showPlaceholder,
+  desktopMode, initialSessionRestored, persistedWorkspace, sessionId, cwd, showPlaceholder, host = null,
   fileTabs, activeFileTabId, rightPanelOpen, setFileTabs, setActiveFileTabId, setRightPanelOpen,
 }: UseDesktopWorkspaceTabsOptions) {
   const [workspaceHydrated, setWorkspaceHydrated] = useState(() => !desktopMode);
@@ -39,6 +41,7 @@ export function useDesktopWorkspaceTabs({
       persistedWorkspace,
       sessionId,
       cwd,
+      host,
     );
     const hasSavedTabs = Boolean(persistedWorkspace?.fileTabs?.length);
 
@@ -47,7 +50,8 @@ export function useDesktopWorkspaceTabs({
 
     if (canMatch && persistedWorkspace) {
       const tabs: Tab[] = persistedWorkspace.fileTabs.map((tab) => ({
-        id: `file:${tab.filePath}`,
+        id: `file:${hostedProjectKey(tab.filePath, tab.host ?? host)}`,
+        host: tab.host ?? host,
         label: tab.label,
         filePath: tab.filePath,
         sourceSessionId: tab.sourceSessionId,
@@ -70,6 +74,7 @@ export function useDesktopWorkspaceTabs({
     persistedWorkspace,
     sessionId,
     cwd,
+    host,
     showPlaceholder,
     setFileTabs,
     setActiveFileTabId,
@@ -82,8 +87,10 @@ export function useDesktopWorkspaceTabs({
     setPrefJson(APP_PREF_KEYS.workspace, {
       sessionId,
       cwd,
+      ...(host ? { host } : {}),
       fileTabs: fileTabs.map((tab) => ({
         filePath: tab.filePath,
+        ...(tab.host ? { host: tab.host } : {}),
         label: tab.label,
         sourceSessionId: tab.sourceSessionId,
         initialDisplayMode: tab.initialDisplayMode,
@@ -96,6 +103,7 @@ export function useDesktopWorkspaceTabs({
     desktopMode,
     sessionId,
     cwd,
+    host,
     fileTabs,
     activeFileTabId,
     rightPanelOpen,

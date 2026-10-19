@@ -6,6 +6,8 @@ import { AnimatedDropdown, PathLabel, displayCwd } from "./path-ui";
 import { isTauriDesktop } from "@/lib/desktop-updater";
 import { selectDirectoryNative } from "@/lib/desktop-window";
 import { isImeComposing } from "@/lib/ime";
+import { localFetch } from "@/lib/remote/client";
+import { useBackendApi } from "@/components/remote/BackendScope";
 
 interface ProjectPickerProps {
   recentProjects: string[];
@@ -61,7 +63,7 @@ export async function selectProjectDirectoryNative(selectedCwd: string | null, h
   const path = await selectDirectoryNative(selectedCwd ?? (homeDir || undefined));
   if (path === null) return null;
 
-  const res = await fetch("/api/cwd/validate", {
+  const res = await localFetch("/api/cwd/validate", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ cwd: path }),
@@ -74,6 +76,7 @@ export async function selectProjectDirectoryNative(selectedCwd: string | null, h
 }
 
 export function ProjectPicker({ recentProjects, selectedCwd, selectedProject, homeDir, onSelectCwd, variant = "block", disabled }: ProjectPickerProps) {
+  const { fetch } = useBackendApi();
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const [dropdownRect, setDropdownRect] = useState<{ top: number; left: number; width: number } | null>(null);
   const [projectFilter, setProjectFilter] = useState("");
@@ -126,7 +129,7 @@ export function ProjectPicker({ recentProjects, selectedCwd, selectedProject, ho
     } finally {
       setCustomPathValidating(false);
     }
-  }, [customPathValidating, onSelectCwd, closeDropdown]);
+  }, [customPathValidating, onSelectCwd, closeDropdown, fetch]);
 
   const handleCustomPathClick = useCallback(async () => {
     if (!isTauriDesktop()) {
@@ -171,7 +174,7 @@ export function ProjectPicker({ recentProjects, selectedCwd, selectedProject, ho
       }
       setDropdownOpen(true);
     }
-  }, [commitCustomPath]);
+  }, [commitCustomPath, fetch]);
 
   const trimmedFilter = projectFilter.trim();
   const showProjectFilter = shouldShowProjectFilter(recentProjects);

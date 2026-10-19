@@ -21,7 +21,7 @@ test("first paint does not read tab sessionStorage", () => {
 test("applies tab session memory after mount instead of suppressing hydration", () => {
   assert.match(
     source,
-    /useLayoutEffect\(\(\) => \{\s+const next = withTabOpen\(initialNavigation, getTabOpen\(\)\);[\s\S]*?setInitialNavigation\(next\);[\s\S]*?if \(next\.sessionId\) setInitialSessionRestored\(false\);[\s\S]*?\}, \[initialNavigation\]\);/,
+    /useLayoutEffect\(\(\) => \{\s+const next = withTabOpen\(initialNavigation, getTabOpen\(\)\);[\s\S]*?setInitialNavigation\(next\);[\s\S]*?if \(next\.sessionId\) setInitialSessionRestored\(false\);[\s\S]*?\}, \[initialNavigation, selectBackend\]\);/,
   );
   assert.doesNotMatch(source, /suppressHydrationWarning/);
 });
@@ -29,7 +29,7 @@ test("applies tab session memory after mount instead of suppressing hydration", 
 test("writes the session URL when tab memory restores onto an empty address bar", () => {
   assert.match(
     source,
-    /if \(!isRestore \|\| new URLSearchParams\(window\.location\.search\)\.get\("session"\) !== session\.id\) \{\s+router\.replace\(`\?session=\$\{encodeURIComponent\(session\.id\)\}`/,
+    /if \(!isRestore \|\| new URLSearchParams\(window\.location\.search\)\.get\("session"\) !== session\.id\) \{\s+router\.replace\(workspaceNavigation\(\{ session: session\.id \}, host\)/,
   );
 });
 
@@ -37,7 +37,7 @@ test("New session is remembered as this tab's selection", () => {
   const start = source.indexOf("  const handleNewSession = useCallback");
   const end = source.indexOf("  // Global keyboard shortcuts", start);
   const body = source.slice(start, end);
-  assert.match(body, /router\.replace\(`\?cwd=\$\{encodeURIComponent\(cwd\)\}`/);
+  assert.match(body, /router\.replace\(workspaceNavigation\(\{ cwd \}, nextHost\)/);
 });
 
 test("deleting the current session forgets its tab memory", () => {

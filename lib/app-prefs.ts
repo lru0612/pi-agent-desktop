@@ -25,6 +25,11 @@ export const APP_PREF_KEYS = {
   diffViewMode: "pi-diff-view-mode",
   /** Last open session / cwd / file tabs for desktop cold-start restore. */
   workspace: "pi-workspace-v1",
+  remoteSessionHosts: "pi-remote:session-hosts:v1",
+  remoteTerminalHosts: "pi-remote:terminal-hosts:v1",
+  remoteRoots: "pi-remote:roots:v1",
+  remotePickedRoots: "pi-remote:picked-roots:v1",
+  remoteProjects: "pi-remote:projects:v1",
 } as const;
 
 export type AppPrefKey = (typeof APP_PREF_KEYS)[keyof typeof APP_PREF_KEYS];

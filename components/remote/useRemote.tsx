@@ -10,10 +10,9 @@ import type { RemoteHostSnapshot, RemoteHostStatus } from "@/lib/remote/types";
 
 const SERVER_SNAPSHOT: RemoteClientSnapshot = {
   hosts: [],
+  projects: [],
   hostsLoaded: false,
   currentHost: null,
-  configHost: undefined,
-  browseHost: null,
   routingVersion: 0,
 };
 

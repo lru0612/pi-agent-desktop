@@ -1,6 +1,7 @@
 import { getInitialNavigation, type InitialNavigation } from "./initial-navigation.ts";
 
 export type PersistedFileTab = {
+  host?: string | null;
   filePath: string;
   label: string;
   sourceSessionId?: string | null;
@@ -8,6 +9,7 @@ export type PersistedFileTab = {
 };
 
 export type PersistedWorkspace = {
+  host?: string | null;
   sessionId: string | null;
   cwd: string | null;
   fileTabs: PersistedFileTab[];
@@ -27,7 +29,10 @@ export function resolveInitialNavigation(
   const fromUrl = getInitialNavigation(searchParams);
   if (fromUrl.sessionId || fromUrl.requestedCwd) return fromUrl;
   if (workspace?.sessionId) {
-    return { requestedCwd: null, sessionId: workspace.sessionId, sidebarCollapsed: false };
+    return { requestedCwd: null, sessionId: workspace.sessionId, sidebarCollapsed: false, ...(workspace.host ? { host: workspace.host } : {}) };
+  }
+  if (workspace?.host && workspace.cwd) {
+    return { ...fromUrl, requestedCwd: workspace.cwd, host: workspace.host };
   }
   return fromUrl;
 }
@@ -36,8 +41,9 @@ export function workspaceFileTabsMatchContext(
   workspace: PersistedWorkspace | null,
   sessionId: string | null,
   cwd: string | null,
+  host: string | null = null,
 ): boolean {
-  if (!workspace?.fileTabs?.length) return false;
+  if (!workspace?.fileTabs?.length || (workspace.host ?? null) !== host) return false;
   if (workspace.sessionId && sessionId && workspace.sessionId === sessionId) return true;
   if (workspace.cwd && cwd && workspace.cwd === cwd) return true;
   return false;

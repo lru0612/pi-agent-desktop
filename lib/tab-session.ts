@@ -28,8 +28,8 @@ interface StorageLike {
 }
 
 export type TabOpen =
-  | { kind: "session"; sessionId: string }
-  | { kind: "new"; cwd: string };
+  | { kind: "session"; sessionId: string; host?: string }
+  | { kind: "new"; cwd: string; host?: string };
 
 function getBrowserStorage(): StorageLike | null {
   if (typeof window === "undefined") return null;
@@ -46,12 +46,14 @@ function parseTabOpen(raw: string | null): TabOpen | null {
     try {
       const parsed: unknown = JSON.parse(raw);
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
-      const record = parsed as { kind?: unknown; sessionId?: unknown; cwd?: unknown };
+      const record = parsed as { kind?: unknown; sessionId?: unknown; cwd?: unknown; host?: unknown };
+      const host = typeof record.host === "string" && /^[a-z0-9][a-z0-9-]{0,31}$/.test(record.host) && record.host !== "local"
+        ? { host: record.host } : {};
       if (record.kind === "session" && typeof record.sessionId === "string" && record.sessionId) {
-        return { kind: "session", sessionId: record.sessionId };
+        return { kind: "session", sessionId: record.sessionId, ...host };
       }
       if (record.kind === "new" && typeof record.cwd === "string" && record.cwd.trim()) {
-        return { kind: "new", cwd: record.cwd };
+        return { kind: "new", cwd: record.cwd, ...host };
       }
       return null;
     } catch {
@@ -80,10 +82,11 @@ export function getTabOpen(
 export function setTabOpenSession(
   sessionId: string,
   storage: StorageLike | null = getBrowserStorage(),
+  host?: string | null,
 ): void {
   if (!storage || !sessionId) return;
   try {
-    writeTabOpen({ kind: "session", sessionId }, storage);
+    writeTabOpen({ kind: "session", sessionId, ...(host ? { host } : {}) }, storage);
   } catch {
     // storage unavailable — memory is best-effort
   }
@@ -92,11 +95,12 @@ export function setTabOpenSession(
 export function setTabOpenNewSession(
   cwd: string,
   storage: StorageLike | null = getBrowserStorage(),
+  host?: string | null,
 ): void {
   const trimmed = cwd.trim();
   if (!storage || !trimmed) return;
   try {
-    writeTabOpen({ kind: "new", cwd: trimmed }, storage);
+    writeTabOpen({ kind: "new", cwd: trimmed, ...(host ? { host } : {}) }, storage);
   } catch {
     // storage unavailable — memory is best-effort
   }

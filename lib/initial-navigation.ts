@@ -4,15 +4,20 @@ export interface InitialNavigation {
   requestedCwd: string | null;
   sessionId: string | null;
   sidebarCollapsed: boolean;
+  /** Explicit backend for a bookmark or restored workspace. */
+  host?: string | null;
 }
 
 export function getInitialNavigation(
   searchParams: Pick<URLSearchParams, "get">,
 ): InitialNavigation {
   const requestedCwd = searchParams.get("cwd")?.trim() || null;
+  const hint = searchParams.get("host");
+  const host = hint === "local" ? null : hint && /^[a-z0-9][a-z0-9-]{0,31}$/.test(hint) ? hint : undefined;
 
   return {
     requestedCwd,
+    ...(host !== undefined ? { host } : {}),
     sessionId: requestedCwd ? null : (searchParams.get("session") || null),
     sidebarCollapsed: searchParams.get("sidebar") === "collapsed",
   };
@@ -38,8 +43,9 @@ export function withTabOpen(
   if (navigation.requestedCwd || navigation.sessionId || !tabOpen) {
     return navigation;
   }
+  const backend = tabOpen.host ? { host: tabOpen.host } : {};
   if (tabOpen.kind === "session") {
-    return { ...navigation, sessionId: tabOpen.sessionId };
+    return { ...navigation, ...backend, sessionId: tabOpen.sessionId };
   }
-  return { ...navigation, requestedCwd: tabOpen.cwd };
+  return { ...navigation, ...backend, requestedCwd: tabOpen.cwd };
 }

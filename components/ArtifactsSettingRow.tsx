@@ -2,6 +2,7 @@
 
 import { useEffect, useId, useState } from "react";
 import { useI18n } from "@/hooks/useI18n";
+import { useBackendApi } from "./remote/BackendScope";
 import { ConfigSwitch } from "./SettingsUi";
 
 /**
@@ -9,6 +10,7 @@ import { ConfigSwitch } from "./SettingsUi";
  * with artifacts. Rendering `:::artifact` blocks does not depend on it.
  */
 export function ArtifactsSettingRow() {
+  const { fetch } = useBackendApi();
   const { t } = useI18n();
   const hintId = useId();
   const [enabled, setEnabled] = useState<boolean | null>(null);
@@ -28,7 +30,7 @@ export function ArtifactsSettingRow() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [fetch]);
 
   const update = (next: boolean) => {
     const previous = enabled;

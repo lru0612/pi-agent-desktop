@@ -5,6 +5,7 @@
  * a single list. See docs/remote-hosts-design.zh-CN.md §5.4.
  */
 import { GET as localSessionsGET } from "@/app/api/sessions/route";
+import { GET as localSearchGET } from "@/app/api/sessions/search/route";
 import {
   getCompletionNotificationSuppressedRpcSessionIds,
   getRunningRpcSessionIds,
@@ -14,7 +15,7 @@ import { getSessionListVersion } from "@/lib/session-reader";
 
 import { getRemoteHostManager } from "./host-manager";
 import { sseFrame } from "./sse";
-import { mergeSessionPayloads, unique } from "./merge";
+import { mergeSearchPayloads, mergeSessionPayloads, unique, type SearchPayload } from "./merge";
 import type { RemoteSessionsPayload } from "./types";
 
 export async function aggregateSessions(request: Request): Promise<Response> {
@@ -53,6 +54,40 @@ function runningSnapshot() {
     sessionListVersion: manager.aggregateVersion(getSessionListVersion()),
     remoteHosts: manager.list(),
   };
+}
+
+/**
+ * Merged GET /api/sessions/search: the local transcripts plus every online
+ * host's. A slow host is cut off after a few seconds (reported as truncated)
+ * so one bad tunnel cannot stall the search box.
+ */
+export async function aggregateSearch(request: Request): Promise<Response> {
+  const url = new URL(request.url);
+  const query = url.searchParams.get("q") ?? "";
+  const manager = getRemoteHostManager();
+  manager.ensureStarted();
+  const localRequest = new Request(new URL(`/api/sessions/search?${new URLSearchParams({ q: query })}`, url), {
+    signal: request.signal,
+  });
+  const online = manager.list().filter((host) => host.status === "online").map((host) => host.id);
+  const [localResponse, remotes] = await Promise.all([
+    localSearchGET(localRequest),
+    Promise.all(online.map(async (host) => {
+      try {
+        const payload = await manager.requestJson<SearchPayload>(
+          host,
+          `/api/sessions/search?${new URLSearchParams({ q: query })}`,
+          8_000,
+        );
+        return { host, payload };
+      } catch {
+        return { host, payload: null };
+      }
+    })),
+  ]);
+  if (!localResponse.ok) return localResponse;
+  const local = await localResponse.json() as SearchPayload;
+  return Response.json(mergeSearchPayloads(local, remotes), { headers: { "Cache-Control": "no-store" } });
 }
 
 export function aggregateRunning(): Response {

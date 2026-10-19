@@ -41,9 +41,9 @@ export interface WorktreeRemoval {
 type Translate = (key: string, params?: TranslationParams) => string;
 
 /** A project's local and remote branches plus its worktrees; empty when the read fails. */
-export async function fetchProjectBranchMenu(projectRoot: string): Promise<ProjectBranchMenuState> {
+export async function fetchProjectBranchMenu(projectRoot: string, request: typeof fetch = fetch): Promise<ProjectBranchMenuState> {
   try {
-    const res = await fetch(`/api/worktrees?cwd=${encodeURIComponent(projectRoot)}&branches=1`);
+    const res = await request(`/api/worktrees?cwd=${encodeURIComponent(projectRoot)}&branches=1`);
     const data = await res.json().catch(() => ({})) as {
       projectRoot?: string;
       isGit?: boolean;
@@ -70,8 +70,8 @@ async function readError(res: Response): Promise<{ error?: string; dirty?: boole
 }
 
 /** `git fetch --prune`, then the fresh branch lists. Throws with git's message on failure. */
-export async function fetchRemoteBranches(projectRoot: string): Promise<{ branches: string[]; remoteBranches: string[] }> {
-  const res = await fetch("/api/worktrees/fetch", {
+export async function fetchRemoteBranches(projectRoot: string, request: typeof fetch = fetch): Promise<{ branches: string[]; remoteBranches: string[] }> {
+  const res = await request("/api/worktrees/fetch", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ cwd: projectRoot }),
@@ -85,8 +85,8 @@ export async function fetchRemoteBranches(projectRoot: string): Promise<{ branch
 }
 
 /** Creates `<repo>-worktrees/<branch>` for an existing or new branch. Throws with git's message on failure. */
-export async function createProjectWorktree(projectRoot: string, branch: string): Promise<{ path: string; branch: string }> {
-  const res = await fetch("/api/worktrees", {
+export async function createProjectWorktree(projectRoot: string, branch: string, request: typeof fetch = fetch): Promise<{ path: string; branch: string }> {
+  const res = await request("/api/worktrees", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ cwd: projectRoot, branch }),
@@ -101,8 +101,8 @@ export async function createProjectWorktree(projectRoot: string, branch: string)
  * when git refuses because the checkout is dirty or has submodules, so the
  * caller can ask again before forcing.
  */
-export async function removeProjectWorktree(projectRoot: string, path: string, force: boolean): Promise<"removed" | "needs-force"> {
-  const res = await fetch("/api/worktrees", {
+export async function removeProjectWorktree(projectRoot: string, path: string, force: boolean, request: typeof fetch = fetch): Promise<"removed" | "needs-force"> {
+  const res = await request("/api/worktrees", {
     method: "DELETE",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ cwd: projectRoot, path, force }),
@@ -124,8 +124,9 @@ function worktreeLabel(worktree: WorktreeEntry): string {
 
 /** Desktop shell: the branch list as a native popup, led by "Fetch from remote". */
 export async function showNativeProjectBranchMenu({
-  projectRoot, at, selectedCwd, switchingBranch, t, onSwitch, onFetch,
+  projectRoot, at, selectedCwd, switchingBranch, t, onSwitch, onFetch, request = fetch,
 }: {
+  request?: typeof fetch;
   projectRoot: string;
   at: NativeMenuPoint;
   selectedCwd: string | null;
@@ -134,7 +135,7 @@ export async function showNativeProjectBranchMenu({
   onSwitch: (projectRoot: string, branch: string, loaded: ProjectBranchMenuState) => void;
   onFetch: (projectRoot: string) => void;
 }) {
-  const data = await fetchProjectBranchMenu(projectRoot);
+  const data = await fetchProjectBranchMenu(projectRoot, request);
   const checkout = currentCheckout(data.worktrees, selectedCwd);
   const names = [
     ...data.branches.map((name) => ({ name, remote: false })),
@@ -170,17 +171,18 @@ export async function showNativeProjectBranchMenu({
  * show the confirmation.
  */
 export async function showNativeProjectWorktreeMenu({
-  projectRoot, at, selectedCwd, t, onSelect, onNew, onRemove,
+  projectRoot, at, selectedCwd, t, onSelect, onNew, onRemove, request = fetch,
 }: {
+  request?: typeof fetch;
   projectRoot: string;
   at: NativeMenuPoint;
   selectedCwd: string | null;
   t: Translate;
-  onSelect: (path: string) => void;
+  onSelect: (path: string, loaded: ProjectBranchMenuState) => void;
   onNew: (projectRoot: string, at: NativeMenuPoint, loaded: ProjectBranchMenuState) => void;
   onRemove: (projectRoot: string, path: string, at: NativeMenuPoint, loaded: ProjectBranchMenuState) => void;
 }) {
-  const data = await fetchProjectBranchMenu(projectRoot);
+  const data = await fetchProjectBranchMenu(projectRoot, request);
   if (!data.isGit) {
     await showNativeMenu([{ label: t("sidebar.worktreesNeedGit"), disabled: true }], at);
     return;
@@ -192,7 +194,7 @@ export async function showNativeProjectWorktreeMenu({
       ...data.worktrees.map((worktree) => ({
         label: worktree.isMain ? `${worktreeLabel(worktree)}  ·  ${t("sidebar.main")}` : worktreeLabel(worktree),
         checked: checkout?.path === worktree.path,
-        onSelect: () => onSelect(worktree.path),
+        onSelect: () => onSelect(worktree.path, data),
       })),
       { kind: "separator" },
       { label: t("sidebar.newWorktree"), onSelect: () => onNew(projectRoot, at, data) },

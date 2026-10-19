@@ -5,7 +5,7 @@
 // remove worktrees. SessionSidebar (upstream-owned) supplies what happens to
 // the sidebar afterwards through the callbacks.
 
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import {
   createProjectWorktree,
   fetchRemoteBranches,
@@ -24,15 +24,19 @@ interface ProjectWorktreeCallbacks {
 
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 
-export function useProjectWorktreeActions({ onBranchesFetched, onWorktreeCreated, onWorktreeRemoved }: ProjectWorktreeCallbacks) {
+export function useProjectWorktreeActions({ onBranchesFetched, onWorktreeCreated, onWorktreeRemoved }: ProjectWorktreeCallbacks, request: typeof fetch = fetch) {
   const [busy, setBusy] = useState(false);
   const [fetching, setFetching] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmRemove, setConfirmRemove] = useState<WorktreeRemoval | null>(null);
   const [newBranch, setNewBranchValue] = useState("");
+  const generation = useRef(0);
 
   /** Clears everything a closed or re-opened menu must not carry over. */
   const reset = useCallback(() => {
+    generation.current++;
+    setBusy(false);
+    setFetching(false);
     setError(null);
     setConfirmRemove(null);
     setNewBranchValue("");
@@ -52,39 +56,45 @@ export function useProjectWorktreeActions({ onBranchesFetched, onWorktreeCreated
 
   const fetchBranches = useCallback(async (projectRoot: string) => {
     if (fetching) return;
+    const operation = generation.current;
     setFetching(true);
     setError(null);
     try {
-      onBranchesFetched(projectRoot, await fetchRemoteBranches(projectRoot));
+      const lists = await fetchRemoteBranches(projectRoot, request);
+      if (operation === generation.current) onBranchesFetched(projectRoot, lists);
     } catch (e) {
-      setError(message(e));
+      if (operation === generation.current) setError(message(e));
     } finally {
-      setFetching(false);
+      if (operation === generation.current) setFetching(false);
     }
-  }, [fetching, onBranchesFetched]);
+  }, [fetching, onBranchesFetched, request]);
 
   const create = useCallback(async (projectRoot: string) => {
     const branch = newBranch.trim();
     if (!branch || busy) return;
+    const operation = generation.current;
     setBusy(true);
     setError(null);
     try {
-      const created = await createProjectWorktree(projectRoot, branch);
+      const created = await createProjectWorktree(projectRoot, branch, request);
+      if (operation !== generation.current) return;
       setNewBranchValue("");
       onWorktreeCreated(projectRoot, created.path, created.branch);
     } catch (e) {
-      setError(message(e));
+      if (operation === generation.current) setError(message(e));
     } finally {
-      setBusy(false);
+      if (operation === generation.current) setBusy(false);
     }
-  }, [busy, newBranch, onWorktreeCreated]);
+  }, [busy, newBranch, onWorktreeCreated, request]);
 
   const remove = useCallback(async (projectRoot: string, removal: WorktreeRemoval) => {
     if (busy) return;
+    const operation = generation.current;
     setBusy(true);
     setError(null);
     try {
-      const result = await removeProjectWorktree(projectRoot, removal.path, removal.force);
+      const result = await removeProjectWorktree(projectRoot, removal.path, removal.force, request);
+      if (operation !== generation.current) return;
       if (result === "needs-force") {
         // Dirty or has submodules: ask again, this time for a forced removal.
         setConfirmRemove({ path: removal.path, force: true });
@@ -93,11 +103,11 @@ export function useProjectWorktreeActions({ onBranchesFetched, onWorktreeCreated
       setConfirmRemove(null);
       onWorktreeRemoved(projectRoot, removal.path);
     } catch (e) {
-      setError(message(e));
+      if (operation === generation.current) setError(message(e));
     } finally {
-      setBusy(false);
+      if (operation === generation.current) setBusy(false);
     }
-  }, [busy, onWorktreeRemoved]);
+  }, [busy, onWorktreeRemoved, request]);
 
   return {
     busy,

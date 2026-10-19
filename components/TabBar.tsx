@@ -9,6 +9,7 @@ export interface Tab {
   id: string;
   label: string;
   filePath: string;
+  host?: string | null;
   kind?: "terminal" | "artifact";
   closing?: boolean;
   sourceSessionId?: string | null;

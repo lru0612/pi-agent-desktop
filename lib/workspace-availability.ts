@@ -15,7 +15,10 @@ export type WorkspaceAvailability = "available" | "missing" | "not-directory" | 
 /** A workspace the UI knows is gone or unusable, for the composer notice. */
 export interface UnavailableWorkspace {
   cwd: string;
-  availability: Exclude<WorkspaceAvailability, "available">;
+  /** "host-offline" (fork, SSH hosts): the folder lives on a host that is not connected. */
+  availability: Exclude<WorkspaceAvailability, "available"> | "host-offline";
+  /** Display name of that host. */
+  host?: string;
 }
 
 export type WorkspaceStatusResult =

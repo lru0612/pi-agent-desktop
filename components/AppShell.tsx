@@ -105,7 +105,12 @@ import { getLastSettingsSection, type SettingsSection } from "@/lib/settings-nav
 import { RemoteHostBanner } from "@/components/remote/RemoteIntegration";
 import { RemoteUiHost } from "@/components/remote/RemoteUiHost";
 import { useRemoteHostRecovered, useRemoteWorkspace } from "@/components/remote/useRemote";
-import { routeApiUrl } from "@/lib/remote/client";
+import { routeApiUrl, localFetch } from "@/lib/remote/client";
+import { BackendScopeProvider } from "@/components/remote/BackendScope";
+import { createBackendApi } from "@/lib/remote/scoped-api";
+import { remoteClientStore } from "@/lib/remote/client-store";
+import { hostedProjectKey } from "@/lib/remote/project-identity";
+import { newWorkspaceDraft, parkedWorkspaceDraft, workspaceNavigation } from "@/lib/remote/navigation";
 
 type SessionCopyField = "file" | "id" | "projectDir" | "gitBranch" | "gitWorktree";
 type AutoNameStatus =
@@ -123,8 +128,8 @@ const FILE_TREE_PREVIEW_MIN_WIDTH = 240;
 // 220px tree beside it left the preview clipped.
 const FILE_TREE_AUTO_COLLAPSE_WIDTH = FILE_TREE_MIN_WIDTH + 320;
 
-function parkedNewSessionDraftKey(cwd: string): string {
-  return `parked-new:${cwd}`;
+function parkedNewSessionDraftKey(cwd: string, host?: string | null): string {
+  return parkedWorkspaceDraft(cwd, host);
 }
 
 export function AppShell() {
@@ -135,6 +140,13 @@ export function AppShell() {
     desktopMode ? getPrefJson<PersistedWorkspace>(APP_PREF_KEYS.workspace) : null
   ));
   const [initialNavigation, setInitialNavigation] = useState(() => resolveInitialNavigation(searchParams, persistedWorkspace));
+  const [workspaceHost, setWorkspaceHost] = useState<string | null>(() => initialNavigation.host ?? null);
+  const activeBackendRef = useRef<string | null>(initialNavigation.host ?? null);
+  const selectBackend = useCallback((sessionId: string | null, cwd: string | null, host: string | null) => {
+    activeBackendRef.current = host;
+    remoteClientStore.selectWorkspace(sessionId, cwd, host);
+    setWorkspaceHost(host);
+  }, []);
   // Subscribed for its side effects only: this hook installs the shared theme
   // store's listener for the app's lifetime, so an "auto" preference keeps
   // following OS scheme changes and the resolved palette keeps being mirrored
@@ -698,7 +710,9 @@ export function AppShell() {
   useEffect(() => {
     try {
       const saved = restoreTerminalTabs(window.sessionStorage.getItem(TERMINAL_TABS_KEY));
-      setTerminalTabs(saved.tabs);
+      const tabs = saved.tabs.map((tab) => ({ ...tab, host: tab.host === undefined ? remoteClientStore.hostOfTerminal(tab.id) ?? null : tab.host }));
+      for (const tab of tabs) remoteClientStore.recordTerminal(tab.id, tab.host);
+      setTerminalTabs(tabs);
       if (saved.activeId) {
         setActiveFileTabId(saved.activeId);
         setRightPanelOpen(saved.open);
@@ -711,7 +725,7 @@ export function AppShell() {
     if (!terminalsRestored) return;
     try {
       window.sessionStorage.setItem(TERMINAL_TABS_KEY, JSON.stringify({
-        tabs: terminalTabs.map(({ id, cwd }) => ({ id, cwd })),
+        tabs: terminalTabs.map(({ id, cwd, host }) => ({ id, cwd, host })),
         activeId: activeFileTabId,
         open: rightPanelOpen,
       }));
@@ -763,9 +777,10 @@ export function AppShell() {
   useLayoutEffect(() => {
     const next = withTabOpen(initialNavigation, getTabOpen());
     if (next === initialNavigation) return;
+    if (next.host !== undefined) selectBackend(next.sessionId, next.requestedCwd, next.host);
     setInitialNavigation(next);
     if (next.sessionId) setInitialSessionRestored(false);
-  }, [initialNavigation]);
+  }, [initialNavigation, selectBackend]);
   // Suppresses sessionKey bump in handleCwdChange during the initial URL restore
   const suppressCwdBumpRef = useRef(false);
   // Guards the async workspace restore so a slow response from an earlier
@@ -785,25 +800,27 @@ export function AppShell() {
   // on that UI instead of resurrecting the previous chat.
   useEffect(() => {
     if (selectedSession) {
-      const projectKey = selectedSession.projectKey
-        ?? activeProjectKeyRef.current
-        ?? workspaceKeyOf(selectedSession);
+      const projectKey = selectedSession.projectKey ? workspaceKeyOf(selectedSession)
+        : activeProjectKeyRef.current ?? workspaceKeyOf(selectedSession);
       setLastOpenSession(projectKey, selectedSession.id);
-      setTabOpenSession(selectedSession.id);
+      setTabOpenSession(selectedSession.id, undefined, selectedSession.host ?? workspaceHost);
       return;
     }
-    if (newSessionCwd) setTabOpenNewSession(newSessionCwd);
-  }, [newSessionCwd, selectedSession]);
+    if (newSessionCwd) setTabOpenNewSession(newSessionCwd, undefined, workspaceHost);
+  }, [newSessionCwd, selectedSession, workspaceHost]);
 
   useEffect(() => {
     const requestedCwd = initialNavigation.requestedCwd;
     if (!requestedCwd) return;
 
     const controller = new AbortController();
+    const host = initialNavigation.host !== undefined ? initialNavigation.host : remoteClientStore.ownerOfPath(requestedCwd) ?? null;
+    selectBackend(null, requestedCwd, host);
+    const backend = createBackendApi(host, localFetch, () => window.location.origin);
     setInitialCwdStatus("validating");
     setInitialCwdError(null);
 
-    void fetch("/api/cwd/validate", {
+    void backend.fetch("/api/cwd/validate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ cwd: requestedCwd }),
@@ -820,11 +837,11 @@ export function AppShell() {
         suppressCwdBumpRef.current = true;
         const draftId = `initial:${requestedCwd}`;
         setNewSessionDraftId(draftId);
-        activeNewSessionDraftKeyRef.current = `new:${draftId}:${data.cwd}`;
+        activeNewSessionDraftKeyRef.current = newWorkspaceDraft(draftId, data.cwd, host);
         setNewSessionCwd(data.cwd);
         setInitialCwdStatus("ready");
         if (!new URLSearchParams(window.location.search).get("cwd")) {
-          router.replace(`?cwd=${encodeURIComponent(data.cwd)}`, { scroll: false });
+          router.replace(workspaceNavigation({ cwd: data.cwd }, initialNavigation.host), { scroll: false });
         }
       })
       .catch((error: unknown) => {
@@ -834,7 +851,7 @@ export function AppShell() {
       });
 
     return () => controller.abort();
-  }, [initialNavigation, router]);
+  }, [initialNavigation, router, selectBackend]);
 
   // Restore the workspace's last open session after switching to it. Called
   // from handleCwdChange once the outgoing context has been reset. The session
@@ -863,20 +880,21 @@ export function AppShell() {
       // remembered session belongs to another worktree of this project.
       const activeDraftKey = activeNewSessionDraftKeyRef.current;
       if (activeDraftKey) {
-        rekeyDraft(activeDraftKey, parkedNewSessionDraftKey(cwd));
+        rekeyDraft(activeDraftKey, parkedNewSessionDraftKey(cwd, activeBackendRef.current));
       }
       activeNewSessionDraftKeyRef.current = null;
       // Selecting the session must remount the chat with the session
       // present: useAgentSession loads content in a mount-only effect, so
       // the null-session welcome mount from the switch would never load
       // the restored session's messages.
+      selectBackend(s.id, s.cwd, s.host ?? null);
       setSelectedSession(s);
       setSessionKey((k) => k + 1);
       // A direct Scheduled URL can restore its hidden workspace while sessions
       // load. That fills the chat but must not switch the visible page.
       if (!scheduledOpenRef.current) {
         if (new URLSearchParams(window.location.search).get("session") !== s.id) {
-          router.replace(`?session=${encodeURIComponent(s.id)}`, { scroll: false });
+          router.replace(workspaceNavigation({ session: s.id }, s.host), { scroll: false });
         }
       }
     };
@@ -892,32 +910,39 @@ export function AppShell() {
       .catch(() => {
         // Network hiccup: keep the remembered session for a later retry.
       });
-  }, [router, sessionCatalog]);
+  }, [router, sessionCatalog, selectBackend]);
 
   const handleCwdChange = useCallback((
     cwd: string | null,
     projectRoot?: string | null,
     projectKey?: string | null,
+    host?: string | null,
   ) => {
     invalidateWorkspaceRestore();
+    const previousHost = activeBackendRef.current;
+    const nextHost = host === undefined ? remoteClientStore.currentHost : host;
     const currentFreshCwd = newSessionCwd ?? activeCwd;
     setActiveCwd(cwd);
     // Skip if cwd is null (initial mount).
     if (!cwd) return;
-    const newProject = projectKey ?? projectRoot ?? cwd;
+    const newProject = hostedProjectKey(projectKey ?? projectRoot ?? cwd, nextHost);
     const currentProject = activeProjectKeyRef.current
       ?? (selectedSession ? workspaceKeyOf(selectedSession) : null);
     activeProjectKeyRef.current = newProject;
+    selectBackend(selectedSession && (selectedSession.host ?? null) === nextHost ? selectedSession.id : null, cwd, nextHost);
 
     // Keep the project identity in sync during the initial URL restore without
     // remounting the just-created or restored chat.
     if (suppressCwdBumpRef.current) {
       suppressCwdBumpRef.current = false;
-      return;
+      if (previousHost === nextHost) return;
     }
+    // A different backend can have the exact same cwd. The upstream session
+    // hook keys fresh composers by cwd, so it needs an explicit reset here.
+    if (previousHost !== nextHost) setSessionKey((key) => key + 1);
     // The server may hydrate a normalized key after a custom cwd is already
     // active. Updating identity for the exact same cwd is not a user switch.
-    if (currentFreshCwd === cwd && currentProject !== newProject) return;
+    if (previousHost === nextHost && currentFreshCwd === cwd && currentProject !== newProject) return;
     // Existing sessions stay open when the worktree selector moves within the
     // same project. A fresh composer must remount when its effective cwd moves,
     // otherwise its already-created runtime would keep sending to the old cwd.
@@ -932,7 +957,7 @@ export function AppShell() {
     // click has already committed, so `selectedSession` here IS the clicked
     // session: keep it open and only drop file tabs left over from the
     // previous project, instead of blanking the chat into a new session.
-    if (selectedSession && (selectedSession.projectRoot ?? selectedSession.cwd) === newProject) {
+    if (selectedSession && workspaceKeyOf(selectedSession) === newProject) {
       setFileTabs([]);
       setActiveFileTabId(null);
       setRightPanelOpen(false);
@@ -942,13 +967,13 @@ export function AppShell() {
     // matches the selected project directory.
     const previousDraftKey = activeNewSessionDraftKeyRef.current;
     if (previousDraftKey && currentFreshCwd) {
-      rekeyDraft(previousDraftKey, parkedNewSessionDraftKey(currentFreshCwd));
+      rekeyDraft(previousDraftKey, parkedNewSessionDraftKey(currentFreshCwd, previousHost));
     }
     const draftId = typeof crypto.randomUUID === "function"
       ? crypto.randomUUID()
       : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-    const draftKey = `new:${draftId}:${cwd}`;
-    rekeyDraft(parkedNewSessionDraftKey(cwd), draftKey);
+    const draftKey = newWorkspaceDraft(draftId, cwd, nextHost);
+    rekeyDraft(parkedNewSessionDraftKey(cwd, nextHost), draftKey);
     setNewSessionDraftId(draftId);
     activeNewSessionDraftKeyRef.current = draftKey;
     setSelectedSession(null);
@@ -979,9 +1004,9 @@ export function AppShell() {
     // direct Scheduled URL. There is no explicit navigation away from that
     // page yet, so retain the URL that made it visible.
     if (!scheduledOpenRef.current) {
-      router.replace(typeof window !== "undefined" ? window.location.pathname : "/", { scroll: false });
+      router.replace(workspaceNavigation({ cwd }, nextHost), { scroll: false });
     }
-  }, [activeCwd, activeFileTabId, invalidateWorkspaceRestore, newSessionCwd, router, selectedSession, restoreWorkspaceContext]);
+  }, [activeCwd, activeFileTabId, invalidateWorkspaceRestore, newSessionCwd, router, selectedSession, restoreWorkspaceContext, selectBackend]);
 
   const handleSelectSession = useCallback((session: SessionInfo, isRestore = false, entryId?: string, blockIndex?: number) => {
     // Picking a session means leaving Scheduled; a cold-start restore must not.
@@ -991,9 +1016,12 @@ export function AppShell() {
     const activeDraftKey = activeNewSessionDraftKeyRef.current;
     const activeDraftCwd = newSessionCwd ?? (selectedSession === null ? activeCwd : null);
     if (activeDraftKey && activeDraftCwd) {
-      rekeyDraft(activeDraftKey, parkedNewSessionDraftKey(activeDraftCwd));
+      rekeyDraft(activeDraftKey, parkedNewSessionDraftKey(activeDraftCwd, activeBackendRef.current));
     }
     activeNewSessionDraftKeyRef.current = null;
+    const host = session.host ?? remoteClientStore.hostOfSession(session.id) ?? null;
+    session = { ...session, ...(host ? { host } : {}) };
+    selectBackend(session.id, session.cwd, host);
     // Adopt an explicitly selected session before the sidebar reports its cwd.
     const projectKey = workspaceKeyOf(session);
     if (activeProjectKeyRef.current !== projectKey) {
@@ -1047,19 +1075,27 @@ export function AppShell() {
     if (isRestore && scheduledOpenRef.current) {
       // A cold-start restore behind the Scheduled page leaves `?view=scheduled` alone.
     } else if (!isRestore || new URLSearchParams(window.location.search).get("session") !== session.id) {
-      router.replace(`?session=${encodeURIComponent(session.id)}`, { scroll: false });
+      router.replace(workspaceNavigation({ session: session.id }, host), { scroll: false });
     }
-  }, [activeCwd, activeFileTabId, invalidateWorkspaceRestore, router, isMobile, newSessionCwd, selectedSession]);
+  }, [activeCwd, activeFileTabId, invalidateWorkspaceRestore, router, isMobile, newSessionCwd, selectedSession, selectBackend]);
 
-  const handleNewSession = useCallback((sessionId: string, cwd: string) => {
+  const handleNewSession = useCallback((sessionId: string, cwd: string, host?: string | null) => {
+    const inferredHost = remoteClientStore.ownerOfPath(cwd);
+    const nextHost = host === undefined ? (inferredHost === undefined ? remoteClientStore.currentHost : inferredHost) : host;
+    if (nextHost !== activeBackendRef.current) {
+      setFileTabs([]);
+      setActiveFileTabId(null);
+      setRightPanelOpen(false);
+    }
+    selectBackend(null, cwd, nextHost);
     setScheduledOpen(false);
     invalidateWorkspaceRestore();
     // "New task" is an explicit reset. A cwd-based blank-task draft would
     // otherwise be reloaded immediately when the composer remounts (legacy
     // key scheme kept for drafts written by older builds).
-    clearDraft(`new:${cwd}`);
-    const draftKey = `new:${sessionId}:${cwd}`;
-    rekeyDraft(parkedNewSessionDraftKey(cwd), draftKey);
+    clearDraft(`new:${hostedProjectKey(cwd, nextHost)}`);
+    const draftKey = newWorkspaceDraft(sessionId, cwd, nextHost);
+    rekeyDraft(parkedNewSessionDraftKey(cwd, nextHost), draftKey);
     activeNewSessionDraftKeyRef.current = draftKey;
     setNewSessionDraftId(sessionId);
     setSelectedSession(null);
@@ -1079,8 +1115,8 @@ export function AppShell() {
     setSystemInfoLoading(false);
     setActiveTopPanel(null);
     if (isMobile) setSidebarOpen(false);
-    router.replace(`?cwd=${encodeURIComponent(cwd)}`, { scroll: false });
-  }, [invalidateWorkspaceRestore, router, isMobile]);
+    router.replace(workspaceNavigation({ cwd }, nextHost), { scroll: false });
+  }, [invalidateWorkspaceRestore, router, isMobile, selectBackend]);
 
   const handleProjectsChange = useCallback((projectRoots: string[]) => {
     setAvailableProjectRoots((previous) => (
@@ -1092,7 +1128,7 @@ export function AppShell() {
 
   const handleProjectChangeFromComposer = useCallback((projectRoot: string) => {
     if (selectedSession) return;
-    handleNewSession(`project-${Date.now()}`, projectRoot);
+    handleNewSession(`project-${Date.now()}`, projectRoot, activeBackendRef.current);
   }, [handleNewSession, selectedSession]);
 
   const handleSelectProjectFromComposer = useCallback(async () => {
@@ -1102,7 +1138,7 @@ export function AppShell() {
         selectedSession?.cwd ?? newSessionCwd ?? activeCwd,
         "",
       );
-      if (cwd) handleNewSession(`project-${Date.now()}`, cwd);
+      if (cwd) handleNewSession(`project-${Date.now()}`, cwd, null);
     } catch (error) {
       console.error("Failed to switch project:", error);
     }
@@ -1201,11 +1237,14 @@ export function AppShell() {
     if (activeNewSessionDraftKeyRef.current !== sourceDraftKey) return;
     invalidateWorkspaceRestore();
     activeNewSessionDraftKeyRef.current = null;
+    const host = session.host ?? remoteClientStore.hostOfSession(session.id) ?? activeBackendRef.current;
+    session = { ...session, ...(host ? { host } : {}) };
+    selectBackend(session.id, session.cwd, host);
     setNewSessionCwd(null);
     setSelectedSession(session);
     hydrateSelectedSession(session.id);
-    router.replace(`?session=${encodeURIComponent(session.id)}`, { scroll: false });
-  }, [invalidateWorkspaceRestore, router, hydrateSelectedSession]);
+    router.replace(workspaceNavigation({ session: session.id }, host), { scroll: false });
+  }, [invalidateWorkspaceRestore, router, hydrateSelectedSession, selectBackend]);
 
   const deliverSessionNotification = useCallback(({
     targetSession,
@@ -1221,7 +1260,7 @@ export function AppShell() {
     if (!("Notification" in window)) return;
 
     const fire = () => {
-      const sessionUrl = targetSession ? `/?session=${encodeURIComponent(targetSession.id)}` : "/";
+      const sessionUrl = targetSession ? `/${workspaceNavigation({ session: targetSession.id }, targetSession.host)}` : "/";
       void showBrowserNotification({
         title,
         body,
@@ -1342,8 +1381,10 @@ export function AppShell() {
       transient: false,
     }));
     hydrateSelectedSession(newSessionId);
-    router.replace(`?session=${encodeURIComponent(newSessionId)}`, { scroll: false });
-  }, [invalidateWorkspaceRestore, router, hydrateSelectedSession]);
+    const host = remoteClientStore.hostOfSession(newSessionId) ?? activeBackendRef.current;
+    selectBackend(newSessionId, selectedSession?.cwd ?? null, host);
+    router.replace(workspaceNavigation({ session: newSessionId }, host), { scroll: false });
+  }, [invalidateWorkspaceRestore, router, hydrateSelectedSession, selectBackend, selectedSession?.cwd]);
 
   const handleAskInNewChat = useCallback(async (
     prompt: string,
@@ -1373,7 +1414,8 @@ export function AppShell() {
         ? crypto.randomUUID()
         : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
       setNewSessionDraftId(draftId);
-      activeNewSessionDraftKeyRef.current = cwd ? `new:${draftId}:${cwd}` : null;
+      activeNewSessionDraftKeyRef.current = cwd ? newWorkspaceDraft(draftId, cwd, activeBackendRef.current) : null;
+      selectBackend(null, cwd, activeBackendRef.current);
       setSelectedSession(null);
       setNewSessionCwd(cwd ?? null);
       setBranchTree([]);
@@ -1383,22 +1425,25 @@ export function AppShell() {
       setSystemTools(null);
       setSystemInfoLoading(false);
       setActiveTopPanel(null);
-      router.replace(cwd ? `?cwd=${encodeURIComponent(cwd)}` : (typeof window !== "undefined" ? window.location.pathname : "/"), { scroll: false });
+      router.replace(cwd ? workspaceNavigation({ cwd }, activeBackendRef.current) : (typeof window !== "undefined" ? window.location.pathname : "/"), { scroll: false });
     }
-  }, [invalidateWorkspaceRestore, selectedSession, router]);
+  }, [invalidateWorkspaceRestore, selectedSession, router, selectBackend]);
 
   const handleOpenFile = useCallback((
     filePath: string,
     fileName: string,
     options?: { sourceSessionId?: string | null; modeHint?: "diff"; page?: number },
   ) => {
-    const sourceSessionId = options?.sourceSessionId;
+    const sourceSessionId = options?.sourceSessionId ?? selectedSession?.id;
+    const sourceHost = sourceSessionId ? remoteClientStore.hostOfSession(sourceSessionId) : undefined;
+    const host = sourceHost === undefined ? activeBackendRef.current : sourceHost;
     const modeHint = options?.modeHint;
     const page = options?.page;
-    const tabId = `file:${filePath}`;
+    const tabId = `file:${hostedProjectKey(filePath, host)}`;
     setFileTabs((prev) => openFileTab(prev, {
       fileName,
       filePath,
+      host,
       modeHint,
       page,
       sourceSessionId,
@@ -1408,7 +1453,7 @@ export function AppShell() {
     setRightPanelOpen(true);
     // On mobile the file panel is full-screen; close the drawer so it shows.
     if (isMobile) setSidebarOpen(false);
-  }, [isMobile]);
+  }, [isMobile, selectedSession?.id]);
 
   const [copiedSessionField, setCopiedSessionField] = useState<SessionCopyField | null>(null);
   const sessionCopyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1424,9 +1469,11 @@ export function AppShell() {
     handleOpenFile(filePath, getFileName(filePath), { sourceSessionId: selectedSession?.id ?? null, page });
   }, [handleOpenFile, selectedSession?.id]);
 
-  const handleOpenTerminal = useCallback((cwd: string) => {
-    const existing = terminalTabs.find((tab) => tab.cwd === cwd);
-    const tab = existing ?? newTerminalTab(cwd);
+  const handleOpenTerminal = useCallback((cwd: string, host?: string | null) => {
+    const backend = host === undefined ? activeBackendRef.current : host;
+    const existing = terminalTabs.find((tab) => tab.cwd === cwd && (tab.host ?? null) === backend);
+    const tab = existing ?? newTerminalTab(cwd, backend);
+    remoteClientStore.recordTerminal(tab.id, backend);
     if (!existing) setTerminalTabs((tabs) => [...tabs, tab]);
     setActiveFileTabId(tab.id);
     setRightPanelOpen(true);
@@ -1459,7 +1506,8 @@ export function AppShell() {
   }, [selectedSessionId]);
 
   const handleTerminalClosed = (tab: TerminalTab) => {
-    const replacement = tab.closing === "restart" ? newTerminalTab(tab.cwd) : null;
+    const replacement = tab.closing === "restart" ? newTerminalTab(tab.cwd, tab.host ?? null) : null;
+    if (replacement) remoteClientStore.recordTerminal(replacement.id, replacement.host ?? null);
     const remaining = terminalTabs.filter((item) => item.id !== tab.id);
     setTerminalTabs((tabs) => tabs.flatMap((item) => item.id !== tab.id ? [item] : replacement ? [replacement] : []));
     setActiveFileTabId((current) => current !== tab.id ? current : replacement?.id ?? remaining.at(-1)?.id ?? fileTabs.at(-1)?.id ?? null);
@@ -1509,13 +1557,20 @@ export function AppShell() {
   // Show chat area if a session is selected, or if we have a cwd to start a new session in
   const effectiveNewSessionCwd = newSessionCwd ?? (selectedSession === null && activeCwd ? activeCwd : null);
   const newSessionDraftKey = selectedSession === null && effectiveNewSessionCwd
-    ? `new:${newSessionDraftId}:${effectiveNewSessionCwd}`
+    ? newWorkspaceDraft(newSessionDraftId, effectiveNewSessionCwd, workspaceHost)
     : null;
   useLayoutEffect(() => {
     activeNewSessionDraftKeyRef.current = newSessionDraftKey;
   }, [newSessionDraftKey]);
   const showChat = selectedSession !== null || effectiveNewSessionCwd !== null;
   const projectTrustCwd = selectedSession?.cwd ?? effectiveNewSessionCwd;
+  const rootsForHost = (host: string | null) => {
+    const known = new Set(sessionCatalog.filter((s) => (s.host ?? null) === host).map((s) => s.projectRoot ?? s.cwd));
+    for (const project of remoteClientStore.getSnapshot().projects) if (project.host === host) known.add(project.projectRoot);
+    return [...new Set(availableProjectRoots)].filter((root) => known.has(root));
+  };
+  const composerProjectRoots = rootsForHost(workspaceHost);
+  const localProjectRoots = rootsForHost(null);
   useRemoteWorkspace(selectedSession?.id, projectTrustCwd);
   // While restoring initial session from URL, don't show the placeholder
   const showPlaceholder = initialSessionRestored && !showChat;
@@ -1524,6 +1579,7 @@ export function AppShell() {
     desktopMode,
     initialSessionRestored,
     persistedWorkspace,
+    host: workspaceHost,
     sessionId: selectedSession?.id ?? null,
     cwd: selectedSession?.cwd ?? newSessionCwd ?? activeCwd,
     showPlaceholder,
@@ -1535,7 +1591,7 @@ export function AppShell() {
     setRightPanelOpen,
   });
 
-  const { workspaceAvailability, unavailableWorkspace, recheckWorkspace } = useWorkspaceAvailability(projectTrustCwd, setModelsRefreshKey);
+  const { workspaceAvailability, unavailableWorkspace, recheckWorkspace } = useWorkspaceAvailability(projectTrustCwd, setModelsRefreshKey, workspaceHost);
   // Fork: reload the chat and models once the workspace's SSH host is back.
   useRemoteHostRecovered(useCallback(() => {
     setModelsRefreshKey((key) => key + 1);
@@ -1569,7 +1625,7 @@ export function AppShell() {
         console.error("Failed to load project trust:", error);
       });
     return () => controller.abort();
-  }, [projectTrustCwd, workspaceAvailability]);
+  }, [projectTrustCwd, workspaceAvailability, workspaceHost]);
 
   const handleTrustProject = useCallback(async () => {
     if (!projectTrustCwd || projectTrustBusy) return;
@@ -2608,7 +2664,7 @@ export function AppShell() {
               onOpenSettings={openSettingsSection}
               onContextUsageChange={handleContextUsageChange}
               onSelectProject={desktopMode ? () => void handleSelectProjectFromComposer() : undefined}
-              projectOptions={selectedSession ? [] : availableProjectRoots}
+              projectOptions={selectedSession ? [] : composerProjectRoots}
               onProjectChange={selectedSession ? undefined : handleProjectChangeFromComposer}
               onOpenModelsConfig={() => setSettingsSection("models")}
               onOpenFile={handleOpenLinkedFile}
@@ -2665,9 +2721,10 @@ export function AppShell() {
         </div>
 
         {scheduledOpen && (
+          <BackendScopeProvider host={null}>
           <ScheduledView
-            projectRoots={availableProjectRoots}
-            defaultCwd={selectedSession?.cwd ?? newSessionCwd ?? activeCwd}
+            projectRoots={localProjectRoots}
+            defaultCwd={workspaceHost === null ? selectedSession?.cwd ?? newSessionCwd ?? activeCwd : localProjectRoots[0] ?? null}
             onBrowseFolder={desktopMode ? handleBrowseScheduledFolder : undefined}
             onOpenSession={async (sessionId) => {
               // handleOpenSession only logs a failure; this page has to tell the user.
@@ -2680,6 +2737,7 @@ export function AppShell() {
               return true;
             }}
           />
+          </BackendScopeProvider>
         )}
       </div>
         </div>

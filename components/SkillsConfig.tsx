@@ -43,6 +43,7 @@ import {
   ConfigSwitch,
   ConfigTrustNotice,
 } from "./SettingsUi";
+import { useBackendApi } from "./remote/BackendScope";
 import { isImeComposing } from "@/lib/ime";
 import { itemsToSwitch, projectTrustReloadKey } from "./settings-ui-helpers";
 
@@ -264,6 +265,7 @@ function AddSkillPanel({
   projectResourcesLoaded: boolean;
   onInstalled: () => void;
 }) {
+  const { fetch } = useBackendApi();
   const { t } = useI18n();
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SkillSearchResult[]>([]);
@@ -307,7 +309,7 @@ function AddSkillPanel({
     } finally {
       setSearching(false);
     }
-  }, [t]);
+  }, [fetch, t]);
 
   const install = useCallback(
     async (pkg: string) => {
@@ -334,7 +336,7 @@ function AddSkillPanel({
         setInstalling(null);
       }
     },
-    [onInstalled, scope, cwd],
+    [fetch, onInstalled, scope, cwd],
   );
 
   const installPath =
@@ -535,6 +537,7 @@ export function SkillsConfig({
   /** The page's trust status for `cwd`; a new decision loads the list again. */
   trust?: ProjectTrustStatus | null;
 }) {
+  const { fetch } = useBackendApi();
   const { t } = useI18n();
   const [skills, setSkills] = useState<Skill[]>([]);
   const [loading, setLoading] = useState(true);
@@ -575,13 +578,13 @@ export function SkillsConfig({
     } finally {
       setLoading(false);
     }
-  }, [cwd]);
+  }, [cwd, fetch]);
 
   useEffect(() => {
     setUpdateStatuses({});
     setUpdateError(null);
     void loadSkills();
-  }, [cwd]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [loadSkills]);
 
   // Whether the project's skills load follows its trust, which can change while
   // this section stays mounted (hidden) in Settings: trusting from Settings ›
@@ -643,7 +646,7 @@ export function SkillsConfig({
       });
       if (!skill) setCheckingAll(false);
     }
-  }, [cwd, skills]);
+  }, [cwd, fetch, skills]);
 
   const updateInstalledSkill = useCallback(async (skill: Skill) => {
     if (!skill.install) return;
@@ -685,7 +688,7 @@ export function SkillsConfig({
     } finally {
       setUpdatingSkill(null);
     }
-  }, [cwd, loadSkills]);
+  }, [cwd, fetch, loadSkills]);
 
   const toggle = useCallback(async (skill: Skill) => {
     const next = !skill.disableModelInvocation;
@@ -722,7 +725,7 @@ export function SkillsConfig({
         return n;
       });
     }
-  }, []);
+  }, [fetch]);
 
   // One PATCH for the whole group: each file is edited on its own and
   // reported separately, so the skills the route refuses keep their state and
@@ -767,7 +770,7 @@ export function SkillsConfig({
         return next;
       });
     }
-  }, [t]);
+  }, [fetch, t]);
 
   const selectedSkill = skills.find((s) => s.filePath === selected) ?? null;
   const bulkBusy = loading || toggling.size > 0 || updatingSkill !== null;

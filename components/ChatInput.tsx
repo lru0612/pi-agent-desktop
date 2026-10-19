@@ -662,7 +662,11 @@ function ModelNoticeBanner({ tone, title, body, action, onClose, dismissLabel }:
 export function WorkspaceUnavailableBanner({ workspace, onRecheck }: { workspace?: UnavailableWorkspace | null; onRecheck?: () => void }) {
   const { t } = useI18n();
   if (!workspace) return null;
-  const body = workspace.availability === "missing"
+  // Fork: a project on an SSH host that is not connected (see hooks/useWorkspaceAvailability.ts).
+  const hostOffline = workspace.availability === "host-offline";
+  const body = hostOffline
+    ? t("remote.workspace.offline", { host: workspace.host ?? "", cwd: workspace.cwd })
+    : workspace.availability === "missing"
     ? t("chat.workspaceMissing", { cwd: workspace.cwd })
     : workspace.availability === "not-directory"
       ? t("chat.workspaceNotDirectory", { cwd: workspace.cwd })
@@ -690,7 +694,7 @@ export function WorkspaceUnavailableBanner({ workspace, onRecheck }: { workspace
               whiteSpace: "nowrap",
             }}
           >
-            {t("chat.workspaceRecheck")}
+            {hostOffline ? t("remote.banner.reconnect") : t("chat.workspaceRecheck")}
           </button>
         ) : undefined}
       />

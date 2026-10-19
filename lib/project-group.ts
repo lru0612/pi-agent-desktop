@@ -1,4 +1,5 @@
 import type { SessionInfo } from "./types";
+import { hostedProjectKey, type HostedProject } from "./remote/project-identity.ts";
 
 /**
  * A project group is the unit rendered as one row in the sidebar's Projects
@@ -6,8 +7,10 @@ import type { SessionInfo } from "./types";
  * the sessions that belong to it, plus the derived signal rows need.
  */
 export interface ProjectGroup {
-  /** Stable key: the project root path, or the cwd for orphan groups. */
+  /** Physical project root; never host-qualified. */
   projectRoot: string;
+  /** Client key for row identity and persisted folding/archive state. */
+  clientKey: string;
   /** Display name: basename of projectRoot, or the full path for orphans. */
   displayName: string;
   /** Sessions that resolve to this project, in input order. */
@@ -47,7 +50,7 @@ function basenameOf(path: string): string {
  */
 export function groupByProject(
   sessions: SessionInfo[],
-  options: { runningIds?: Set<string>; unreadIds?: Set<string> } = {},
+  options: { runningIds?: Set<string>; unreadIds?: Set<string>; projects?: readonly HostedProject[] } = {},
 ): ProjectGroup[] {
   const { runningIds, unreadIds } = options;
   const groups = new Map<string, ProjectGroup>();
@@ -56,11 +59,12 @@ export function groupByProject(
     const root = session.projectRoot || session.cwd;
     // Fork: the same path on two machines is two projects.
     const host = (session as SessionInfo & { host?: string }).host;
-    const key = host ? `${host}\u0000${root}` : root;
+    const key = hostedProjectKey(root, host);
     let group = groups.get(key);
     if (!group) {
       group = {
         projectRoot: root,
+        clientKey: key,
         displayName: basenameOf(root),
         sessions: [],
         latestModified: session.modified,
@@ -77,6 +81,24 @@ export function groupByProject(
     }
     if (runningIds?.has(session.id)) group.runningIds.add(session.id);
     if (unreadIds?.has(session.id)) group.unreadIds.add(session.id);
+  }
+
+  // Explicit picks only, never access-grant roots or fabricated sessions.
+  // A picked linked worktree belongs under its main project root.
+  for (const project of options.projects ?? []) {
+    const key = hostedProjectKey(project.projectRoot, project.host);
+    if (groups.has(key)) continue;
+    groups.set(key, {
+      projectRoot: project.projectRoot,
+      clientKey: key,
+      displayName: basenameOf(project.projectRoot),
+      sessions: [],
+      latestModified: "",
+      unreadIds: new Set(),
+      runningIds: new Set(),
+      branches: [],
+      ...(project.host ? { host: project.host } : {}),
+    });
   }
 
   for (const group of groups.values()) {

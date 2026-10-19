@@ -180,12 +180,14 @@ test("git errors are shown on the page that caused them", () => {
 test("the sidebar wires the worktree pages into both the DOM and the native menu", async () => {
   const sidebar = await readFile(new URL("./SessionSidebar.tsx", import.meta.url), "utf8");
   // Native: a Worktrees entry next to Switch branch, and fetch in the branch popup.
-  assert.match(sidebar, /label: t\("sidebar\.worktrees"\), onSelect: \(\) => void showNativeWorktreeMenu\(projectRoot, at\)/);
+  assert.match(sidebar, /label: t\("sidebar\.worktrees"\), onSelect: \(\) => void showNativeWorktreeMenu\(project, at\)/);
+  assert.match(sidebar, /showNativeWorktreeMenu = useCallback\(\(project: ProjectMenuTarget/);
+  assert.match(sidebar, /request: project\.api\.fetch/);
   assert.match(sidebar, /showNativeProjectWorktreeMenu\(\{/);
   assert.match(sidebar, /onFetch: \(root\) => void \(async \(\) => \{/);
   // Steps a native menu cannot do open the DOM menu at the same point.
-  assert.match(sidebar, /openDomProjectMenu\(root, point, "new-worktree", loaded\)/);
-  assert.match(sidebar, /openDomProjectMenu\(root, point, "worktrees", loaded\);\s+requestWorktreeRemoval\(path\)/);
+  assert.match(sidebar, /openDomProjectMenu\(project, point, "new-worktree", loaded\)/);
+  assert.match(sidebar, /openDomProjectMenu\(project, point, "worktrees", loaded\);\s+requestWorktreeRemoval\(path\)/);
   // DOM: the view and every worktree action reach the menu.
   for (const prop of ["view={projectMenuView}", "onFetch=", "onSelectWorktree=", "onConfirmRemove=", "onCreateWorktree="]) {
     assert.ok(sidebar.includes(prop), prop);

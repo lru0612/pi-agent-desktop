@@ -7,7 +7,7 @@
  * - useRemoteConfigScope: the Settings "Settings for: …" switch.
  * - canUseNativeFileActions: hide Finder/open-with actions for remote paths.
  */
-import { useEffect, useRef } from "react";
+import { useState } from "react";
 
 import { useI18n } from "@/hooks/useI18n";
 import { canUseNativeMenu, menuPointBelow, showNativeMenu } from "@/lib/desktop-menu";
@@ -66,7 +66,7 @@ type Translate = (key: string, params?: Record<string, string | number>) => stri
 export async function openAddProjectMenu(
   anchor: Element,
   t: Translate,
-  handlers: { onLocal: () => void; onPicked: (cwd: string) => void },
+  handlers: { onLocal: () => void; onPicked: (cwd: string, host: string) => void },
 ): Promise<void> {
   const hosts = remoteClientStore.getSnapshot().hosts;
   const entries: NativeMenuEntry[] = [{ label: t("remote.addProject.local"), onSelect: handlers.onLocal }];
@@ -100,27 +100,23 @@ export async function openAddProjectMenu(
 // ------------------------------------------------------------------ settings scope
 
 /**
- * Settings scope switch. While Settings is open the router sends config
- * requests to the chosen backend; `scopeKey` remounts the sections on change.
+ * Settings owns its backend choice locally; only descendants of its provider
+ * route config requests there. `scopeKey` remounts the sections on change.
  * `cwdApplies` is false when the open project lives on another backend, so
  * project-scoped sections are hidden instead of writing to the wrong place.
  */
-export function useRemoteConfigScope(cwd: string | null | undefined): { scopeKey: string; cwdApplies: boolean; element: React.ReactNode } {
+export function useRemoteConfigScope(cwd: string | null | undefined, disabled = false): { host: string | null; scopeKey: string; cwdApplies: boolean; element: React.ReactNode } {
   const { t } = useI18n();
   const state = useRemoteClientState();
-  const initialRef = useRef<string | null>(state.currentHost);
-
-  useEffect(() => {
-    remoteClientStore.setConfigHost(initialRef.current);
-    return () => remoteClientStore.setConfigHost(undefined);
-  }, []);
-
-  const scope = state.configHost === undefined ? initialRef.current : state.configHost;
+  const [scope, setScope] = useState<string | null>(() => {
+    const owner = cwd ? remoteClientStore.ownerOfPath(cwd) : undefined;
+    return owner === undefined ? state.currentHost : owner;
+  });
   const scopeKey = scope ?? "local";
   const cwdOwner = cwd ? remoteClientStore.ownerOfPath(cwd) : undefined;
   const cwdHost = cwdOwner !== undefined ? cwdOwner : state.currentHost;
-  const cwdApplies = !cwd || cwdHost === scope;
-  if (state.hosts.length === 0 && scope === null) return { scopeKey, cwdApplies, element: null };
+  const cwdApplies = cwdHost === scope;
+  if (state.hosts.length === 0 && scope === null) return { host: scope, scopeKey, cwdApplies, element: null };
   const element = (
     <label className="settings-remote-scope" title={t("remote.scope.label")}>
       <span className={`sidebar-project-remote-globe is-${scope ? hostStatusTone(state.hosts.find((h) => h.id === scope)?.status) : "online"}`} aria-hidden="true">
@@ -129,7 +125,8 @@ export function useRemoteConfigScope(cwd: string | null | undefined): { scopeKey
       <span className="settings-remote-scope-label">{t("remote.scope.label")}</span>
       <select
         value={scopeKey}
-        onChange={(event) => remoteClientStore.setConfigHost(event.target.value === "local" ? null : event.target.value)}
+        disabled={disabled}
+        onChange={(event) => { if (!disabled) setScope(event.target.value === "local" ? null : event.target.value); }}
       >
         <option value="local">{t("remote.scope.local")}</option>
         {state.hosts.map((host) => (
@@ -138,9 +135,20 @@ export function useRemoteConfigScope(cwd: string | null | undefined): { scopeKey
           </option>
         ))}
       </select>
+      <button
+        type="button"
+        className="settings-remote-scope-manage"
+        disabled={disabled}
+        title={t("remote.addProject.manageHosts")}
+        aria-label={t("remote.addProject.manageHosts")}
+        onClick={() => openRemoteHostsDialog(scope ? { focusHost: scope } : {})}
+      >
+        <GlobeIcon size={12} />
+        <span aria-hidden="true">…</span>
+      </button>
     </label>
   );
-  return { scopeKey, cwdApplies, element };
+  return { host: scope, scopeKey, cwdApplies, element };
 }
 
 export { canUseNativeFileActions } from "@/lib/remote/client-store";

@@ -9,7 +9,7 @@ test("starting another blank task remounts the composer even in the same cwd", a
   assert.notEqual(start, -1);
   assert.notEqual(end, -1);
   const handler = source.slice(start, end);
-  assert.match(handler, /clearDraft\(`new:\$\{cwd\}`\)/);
+  assert.match(handler, /clearDraft\(`new:\$\{hostedProjectKey\(cwd, nextHost\)\}`\)/);
   assert.match(handler, /setSessionKey\(\(key\) => key \+ 1\)/);
 });
 

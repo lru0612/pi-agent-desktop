@@ -1,15 +1,17 @@
 export interface TerminalTab {
   id: string;
   cwd: string;
+  /** Captured backend: a retained terminal never follows the active chat. */
+  host?: string | null;
   restored?: boolean;
   closing?: "close" | "restart";
 }
 
 export const TERMINAL_TABS_KEY = "pi-web:terminal-tabs";
 
-export function newTerminalTab(cwd: string): TerminalTab {
+export function newTerminalTab(cwd: string, host?: string | null): TerminalTab {
   const id = Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, "0")).join("");
-  return { id, cwd };
+  return { id, cwd, ...(host !== undefined ? { host } : {}) };
 }
 
 export function restoreTerminalTabs(raw: string | null): { tabs: TerminalTab[]; activeId: string | null; open: boolean } {
@@ -19,8 +21,9 @@ export function restoreTerminalTabs(raw: string | null): { tabs: TerminalTab[]; 
     for (const tab of Array.isArray(saved?.tabs) ? saved.tabs : []) {
       if (tab && typeof tab.id === "string" && /^[a-f0-9]{32}$/.test(tab.id)
         && typeof tab.cwd === "string" && tab.cwd.trim()
-        && !tabs.some((existing) => existing.id === tab.id || existing.cwd === tab.cwd)) {
-        tabs.push({ id: tab.id, cwd: tab.cwd, restored: true });
+        && !tabs.some((existing) => existing.id === tab.id || (existing.cwd === tab.cwd && (existing.host ?? null) === (tab.host ?? null)))) {
+        const host = typeof tab.host === "string" && /^[a-z0-9][a-z0-9-]{0,31}$/.test(tab.host) && tab.host !== "local" ? tab.host : null;
+        tabs.push({ id: tab.id, cwd: tab.cwd, restored: true, ...(tab.host !== undefined ? { host } : {}) });
       }
     }
     return { tabs, activeId: tabs.some((tab) => tab.id === saved.activeId) ? saved.activeId : null, open: saved?.open === true };

@@ -1,9 +1,10 @@
 "use client";
 
-import { type CSSProperties, type FormEvent, useCallback, useEffect, useState } from "react";
+import { type CSSProperties, type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useI18n } from "@/hooks/useI18n";
 import { isImeComposing } from "@/lib/ime";
+import { useBackendApi } from "@/components/remote/BackendScope";
 
 interface DirectoryEntry {
   name: string;
@@ -65,16 +66,16 @@ const secondaryActionStyle: CSSProperties = {
   color: "var(--text-muted)",
 };
 
-async function loadDirectories(directory?: string): Promise<BrowseResponse> {
+async function loadDirectories(directory: string | undefined, fetchImpl: typeof fetch, signal: AbortSignal): Promise<BrowseResponse> {
   const query = directory ? `?path=${encodeURIComponent(directory)}` : "";
-  const response = await fetch(`/api/cwd/browse${query}`);
+  const response = await fetchImpl(`/api/cwd/browse${query}`, { signal });
   const data = await response.json() as BrowseResponse;
   if (!response.ok || data.error) throw new Error(data.error ?? `HTTP ${response.status}`);
   return data;
 }
 
-async function createDirectory(parentPath: string, name: string): Promise<string> {
-  const response = await fetch("/api/cwd/browse", {
+async function createDirectory(parentPath: string, name: string, fetchImpl: typeof fetch): Promise<string> {
+  const response = await fetchImpl("/api/cwd/browse", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ path: parentPath, name }),
@@ -118,6 +119,8 @@ interface Props {
 
 export function DirectoryPicker({ onCancel, onSelect, initialPath, busy = false, error }: Props) {
   const { t } = useI18n();
+  const { fetch: backendFetch } = useBackendApi();
+  const navigationRef = useRef<AbortController | null>(null);
   const [portalTarget, setPortalTarget] = useState<HTMLElement | null>(null);
   const [currentPath, setCurrentPath] = useState("");
   const [parentDirectory, setParentDirectory] = useState<string | null>(null);
@@ -132,10 +135,14 @@ export function DirectoryPicker({ onCancel, onSelect, initialPath, busy = false,
   const [creating, setCreating] = useState(false);
 
   const navigateTo = useCallback(async (directory?: string) => {
+    navigationRef.current?.abort();
+    const controller = new AbortController();
+    navigationRef.current = controller;
     setLoading(true);
     setLoadError(null);
     try {
-      const data = await loadDirectories(directory);
+      const data = await loadDirectories(directory, backendFetch, controller.signal);
+      if (controller.signal.aborted) return;
       const nextPath = data.path ?? directory ?? "/";
       setCurrentPath(nextPath);
       setParentDirectory(data.parentPath ?? null);
@@ -143,15 +150,16 @@ export function DirectoryPicker({ onCancel, onSelect, initialPath, busy = false,
       setDirectories(data.directories ?? []);
       setDrives(data.drives ?? null);
     } catch (cause) {
-      setLoadError(cause instanceof Error ? cause.message : String(cause));
+      if (!controller.signal.aborted) setLoadError(cause instanceof Error ? cause.message : String(cause));
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) setLoading(false);
     }
-  }, []);
+  }, [backendFetch]);
 
   useEffect(() => {
     setPortalTarget(document.body);
     void navigateTo(initialPath || undefined);
+    return () => navigationRef.current?.abort();
   }, [initialPath, navigateTo]);
 
   const handlePathSubmit = (event: FormEvent<HTMLFormElement>) => {
@@ -176,7 +184,7 @@ export function DirectoryPicker({ onCancel, onSelect, initialPath, busy = false,
     setCreating(true);
     setCreateError(null);
     try {
-      const createdPath = await createDirectory(currentPath, name);
+      const createdPath = await createDirectory(currentPath, name, backendFetch);
       setCreateOpen(false);
       setDirectoryName("");
       await navigateTo(createdPath);
@@ -188,7 +196,7 @@ export function DirectoryPicker({ onCancel, onSelect, initialPath, busy = false,
   };
 
   const hasUncommittedPath = pathInput.trim() !== currentPath;
-  const canSelect = Boolean(currentPath) && !hasUncommittedPath && !busy;
+  const canSelect = Boolean(currentPath) && !hasUncommittedPath && !busy && !loading && !loadError && !error;
   const canCreate = canSelect && !loading;
   const canNavigateUp = Boolean(parentDirectory) || isWindowsDriveRoot(currentPath);
 

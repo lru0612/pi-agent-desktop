@@ -5,17 +5,12 @@
  * Grey when the host is offline, pulsing while it connects.
  */
 import { useI18n } from "@/hooks/useI18n";
-import { remoteClientStore } from "@/lib/remote/client-store";
-import type { HostedSessionInfo } from "@/lib/remote/types";
-import type { SessionInfo } from "@/lib/types";
 
 import { GlobeIcon, hostStatusTone, useRemoteClientState } from "./useRemote";
 
-export function RemoteProjectBadge({ projectRoot, sessions }: { projectRoot: string; sessions: SessionInfo[] }) {
+export function RemoteProjectBadge({ host: hostId }: { host: string | null }) {
   const { t } = useI18n();
   const state = useRemoteClientState();
-  void state.routingVersion; // re-render when ownership knowledge changes
-  const hostId = remoteClientStore.hostOfProject(projectRoot, sessions as HostedSessionInfo[]);
   if (!hostId) return null;
   const host = state.hosts.find((item) => item.id === hostId);
   const status = host?.status ?? "offline";

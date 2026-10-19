@@ -8033,7 +8033,9 @@ html.dark {
 .remote-dialog-overlay {
   position: fixed;
   inset: 0;
-  z-index: 1000;
+  /* Above Settings (1000), which can open the host manager; below the
+     project-trust dialog (1100). */
+  z-index: 1050;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -8277,4 +8279,28 @@ html.dark {
   background: var(--bg-panel);
   color: var(--text);
   font-size: 12px;
+}
+
+.settings-remote-scope-manage {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 24px;
+  padding: 0 6px;
+  border: var(--hairline) solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-panel);
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.settings-remote-scope-manage:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.settings-remote-scope-manage:disabled {
+  opacity: 0.55;
+  cursor: default;
 }

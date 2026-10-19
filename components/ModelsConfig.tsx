@@ -58,6 +58,7 @@ import { NonChatModelsDetail } from "./NonChatModelsDetail";
 import { providerBadgeLabel } from "./enabled-models-helpers";
 import { OAuthPastePanel } from "./OAuthPastePanel";
 import { ProviderIcon } from "./ProviderIcon";
+import { useBackendApi } from "./remote/BackendScope";
 import { ProviderUsageSummary } from "./ProviderUsageSummary";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -320,6 +321,7 @@ function ProviderDetail({ name, editingName, provider, onChange, onEditingNameCh
   onRename: (n: string) => void; onDelete: () => void;
   onAddModels: (models: DiscoveredModel[]) => void; enabledModels: EnabledModelsController;
 }) {
+  const { fetch } = useBackendApi();
   const { t } = useI18n();
   const [discoveryState, setDiscoveryState] = useState<ModelDiscoveryState>({ phase: "idle" });
   const [discoveryQuery, setDiscoveryQuery] = useState("");
@@ -363,7 +365,7 @@ function ProviderDetail({ name, editingName, provider, onChange, onEditingNameCh
       if (requestId !== discoveryRequestIdRef.current) return;
       setDiscoveryState({ phase: "error", message: error instanceof Error ? error.message : String(error) });
     }
-  }, [discoveryState.phase, name, provider]);
+  }, [discoveryState.phase, fetch, name, provider]);
 
   const existingModelIds = new Set((provider.models ?? []).map((model) => model.id));
   const modelOverrides = listModelOverrides(provider.modelOverrides);
@@ -876,6 +878,7 @@ function ModelDetail({
   onChange: (m: ModelEntry) => void;
   onDelete: () => void;
 }) {
+  const { fetch } = useBackendApi();
   const [testState, setTestState] = useState<ModelTestState>({ phase: "idle" });
   const { t } = useI18n();
   const [catalogState, setCatalogState] = useState<ModelCatalogState>({ phase: "idle" });
@@ -999,7 +1002,7 @@ function ModelDetail({
     } catch (e) {
       setTestState({ phase: "error", message: e instanceof Error ? e.message : String(e) });
     }
-  }, [model, provider, providerName, testState.phase]);
+  }, [fetch, model, provider, providerName, testState.phase]);
 
   const handleCatalogFill = useCallback(async () => {
     const query = model.id.trim();
@@ -1031,7 +1034,7 @@ function ModelDetail({
       if (requestId !== catalogRequestIdRef.current) return;
       setCatalogState({ phase: "error", message: error instanceof Error ? error.message : String(error) });
     }
-  }, [catalogState.phase, model, onChange, provider.baseUrl, providerName]);
+  }, [catalogState.phase, fetch, model, onChange, provider.baseUrl, providerName]);
 
   const undoCatalogFill = () => {
     const previous = catalogUndoRef.current;
@@ -1382,6 +1385,7 @@ function ModelDetail({
 function OAuthDetail({ provider, onRefresh, enabledModels }: {
   provider: OAuthProvider; onRefresh: () => void; enabledModels: EnabledModelsController;
 }) {
+  const { fetch, url } = useBackendApi();
   const [loginState, setLoginState] = useState<OAuthLoginState>({ phase: "idle" });
   const { t } = useI18n();
   const [inputValue, setInputValue] = useState("");
@@ -1411,7 +1415,7 @@ function OAuthDetail({ provider, onRefresh, enabledModels }: {
     setLoginState({ phase: "connecting" });
     setInputValue("");
 
-    const es = new EventSource(`/api/auth/login/${encodeURIComponent(provider.id)}`);
+    const es = new EventSource(url(`/api/auth/login/${encodeURIComponent(provider.id)}`));
     eventSourceRef.current = es;
 
     es.onmessage = (e) => {
@@ -1455,13 +1459,13 @@ function OAuthDetail({ provider, onRefresh, enabledModels }: {
       es.close();
       setLoginState((prev) => prev.phase === "success" ? prev : { phase: "error", message: "Connection lost" });
     };
-  }, [provider.id, onRefresh]);
+  }, [provider.id, onRefresh, url]);
 
   const handleLogout = useCallback(async () => {
     await fetch(`/api/auth/logout/${encodeURIComponent(provider.id)}`, { method: "POST" });
     setLoginState({ phase: "idle" });
     onRefresh();
-  }, [provider.id, onRefresh]);
+  }, [fetch, provider.id, onRefresh]);
 
   const submitCode = useCallback(async (token: string, code: string) => {
     if (!code.trim()) return;
@@ -1482,7 +1486,7 @@ function OAuthDetail({ provider, onRefresh, enabledModels }: {
     } catch (e) {
       setLoginState({ phase: "error", message: e instanceof Error ? e.message : "Network error" });
     }
-  }, [provider.id]);
+  }, [fetch, provider.id]);
 
   const submitSelection = useCallback(async (token: string, value: string) => {
     setLoginState({ phase: "progress", message: "Continuing…" });
@@ -1499,7 +1503,7 @@ function OAuthDetail({ provider, onRefresh, enabledModels }: {
     } catch (e) {
       setLoginState({ phase: "error", message: e instanceof Error ? e.message : "Network error" });
     }
-  }, [provider.id]);
+  }, [fetch, provider.id]);
 
   const isWorking = loginState.phase === "connecting" || loginState.phase === "progress" ||
     loginState.phase === "auth" || loginState.phase === "device_code" ||
@@ -1639,6 +1643,7 @@ function OAuthDetail({ provider, onRefresh, enabledModels }: {
 function ApiKeyDetail({ provider, onRefresh, enabledModels }: {
   provider: ApiKeyProvider; onRefresh: () => void; enabledModels: EnabledModelsController;
 }) {
+  const { fetch } = useBackendApi();
   const [apiKey, setApiKey] = useState("");
   const [saving, setSaving] = useState(false);
   const [removing, setRemoving] = useState(false);
@@ -1678,7 +1683,7 @@ function ApiKeyDetail({ provider, onRefresh, enabledModels }: {
     } finally {
       setSaving(false);
     }
-  }, [apiKey, provider.id, onRefresh]);
+  }, [apiKey, fetch, provider.id, onRefresh]);
 
   const handleRemove = useCallback(async () => {
     setRemoving(true);
@@ -1693,7 +1698,7 @@ function ApiKeyDetail({ provider, onRefresh, enabledModels }: {
     } finally {
       setRemoving(false);
     }
-  }, [provider.id, onRefresh]);
+  }, [fetch, provider.id, onRefresh]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -1917,6 +1922,7 @@ export function ModelsConfig({ onClose, embedded = false, cwd = null, onOpenMcp 
   /** Settings › MCP holds the Code mode choice the non-chat models depend on. */
   onOpenMcp?: () => void;
 }) {
+  const { fetch } = useBackendApi();
   const { t } = useI18n();
   // `enabledModels` lives in pi's settings, not models.json, so these switches
   // apply immediately instead of waiting for this panel's Save button.
@@ -1958,7 +1964,7 @@ export function ModelsConfig({ onClose, embedded = false, cwd = null, onOpenMcp 
         if (Array.isArray(d.apiKeyProviders)) setApiKeyProviders(d.apiKeyProviders);
       })
       .catch(() => {});
-  }, []);
+  }, [fetch]);
 
   useEffect(() => {
     fetch("/api/models-config")
@@ -1983,7 +1989,7 @@ export function ModelsConfig({ onClose, embedded = false, cwd = null, onOpenMcp 
       .catch((e: unknown) => setLoadError(e instanceof Error ? e.message : String(e)))
       .finally(() => setLoading(false));
     refreshAuthProviders();
-  }, [refreshAuthProviders]);
+  }, [fetch, refreshAuthProviders]);
 
   useEffect(() => {
     if (selection) setLastSettingsSelection("models", JSON.stringify(selection));
@@ -2141,7 +2147,7 @@ export function ModelsConfig({ onClose, embedded = false, cwd = null, onOpenMcp 
     } finally {
       setSaving(false);
     }
-  }, [applyProviderRename, config, enabledModels, loadError, providerNameDraft, t]);
+  }, [applyProviderRename, config, enabledModels, fetch, loadError, providerNameDraft, t]);
 
   const providers = Object.entries(config.providers ?? {});
   // `12/40` next to a provider makes a narrowed selector visible at a glance.

@@ -47,6 +47,7 @@ import {
   ConfigSwitch,
   ConfigTrustNotice,
 } from "./SettingsUi";
+import { useBackendApi } from "./remote/BackendScope";
 import { itemsToSwitch, projectTrustReloadKey } from "./settings-ui-helpers";
 
 type PluginScope = PluginPackageInfo["scope"];
@@ -579,6 +580,7 @@ export function PluginsConfig({
   /** The page's trust status for `cwd`; a new decision loads the list again. */
   trust?: ProjectTrustStatus | null;
 }) {
+  const { fetch } = useBackendApi();
   const { t } = useI18n();
   const [data, setData] = useState<PluginsResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -636,13 +638,13 @@ export function PluginsConfig({
     } finally {
       setLoading(false);
     }
-  }, [cwd]);
+  }, [cwd, fetch]);
 
   useEffect(() => {
     setUpdateStatuses({});
     setUpdateError(null);
     void loadPlugins();
-  }, [cwd]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [loadPlugins]);
 
   // Whether project packages load, and the Project scope can be chosen, follows
   // the folder's trust, which can change while this section stays mounted
@@ -701,7 +703,7 @@ export function PluginsConfig({
       });
       if (!pkg) setCheckingAll(false);
     }
-  }, [cwd, packages]);
+  }, [cwd, fetch, packages]);
 
   const updateAllPluginsAction = useCallback(async () => {
     setUpdatingAll(true);
@@ -727,7 +729,7 @@ export function PluginsConfig({
     } finally {
       setUpdatingAll(false);
     }
-  }, [cwd, sessionId, t]);
+  }, [cwd, fetch, sessionId, t]);
 
   const runAction = useCallback(async (action: PluginAction, pkg: PluginPackageInfo) => {
     const key = packageKey(pkg);
@@ -778,7 +780,7 @@ export function PluginsConfig({
     } finally {
       setBusyKey(null);
     }
-  }, [cwd, t]);
+  }, [cwd, fetch, t]);
 
   // Behaves like the package switch, for every package of one scope: the
   // confirmation appears in the package detail and the session is reloaded by
@@ -832,7 +834,7 @@ export function PluginsConfig({
     } finally {
       setBusyKey(null);
     }
-  }, [cwd, sessionId, t]);
+  }, [cwd, fetch, sessionId, t]);
 
   const installPlugin = useCallback(async () => {
     const source = normalizePluginSourceInput(installSource).trim();
@@ -862,7 +864,7 @@ export function PluginsConfig({
     } finally {
       setBusyKey(null);
     }
-  }, [cwd, installScope, installSource, t]);
+  }, [cwd, fetch, installScope, installSource, t]);
 
   const reloadSession = useCallback(async () => {
     if (!sessionId) return;

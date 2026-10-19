@@ -1,5 +1,5 @@
-export async function terminalRequest(path: string, options?: RequestInit): Promise<{ id?: string; cwd?: string }> {
-  const response = await fetch(path, { ...options, signal: AbortSignal.timeout(15_000) });
+export async function terminalRequest(path: string, options?: RequestInit, fetchImpl: typeof fetch = fetch): Promise<{ id?: string; cwd?: string }> {
+  const response = await fetchImpl(path, { ...options, signal: AbortSignal.timeout(15_000) });
   const data = await response.json().catch(() => {
     throw new Error(`Terminal request failed (HTTP ${response.status}): server returned an empty or invalid JSON response. Check the pi-web server log.`);
   });
@@ -8,7 +8,7 @@ export async function terminalRequest(path: string, options?: RequestInit): Prom
   return data;
 }
 
-export function createTerminalWriter(id: string, onError: (error: Error) => void) {
+export function createTerminalWriter(id: string, onError: (error: Error) => void, fetchImpl: typeof fetch = fetch) {
   let pending = Promise.resolve();
   let stopped = false;
   let bufferedInput: { type: "input"; data: string } | null = null;
@@ -21,7 +21,7 @@ export function createTerminalWriter(id: string, onError: (error: Error) => void
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
-      });
+      }, fetchImpl);
     }).catch((error: Error) => {
       // Delivery is ambiguous after a network error. Never replay shell input.
       stopped = true;

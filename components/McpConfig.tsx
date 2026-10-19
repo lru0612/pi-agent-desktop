@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useId, useRef, useState, type Ref } from "react";
+import { useBackendApi } from "./remote/BackendScope";
 import type { McpExposure } from "@earendil-works/pi-coding-agent";
 import type {
   CodemodeMode,
@@ -304,6 +305,7 @@ export function McpConfig({
   /** Hands the page `cwd`'s trust after an Add wrote to its `.pi/mcp.json` (and maybe trusted it). */
   onProjectTrustChanged?: (cwd: string, status: ProjectTrustStatus) => void;
 }) {
+  const { fetch } = useBackendApi();
   const [load, setLoad] = useState<McpConfigLoad>({ state: "loading" });
   const [refreshing, setRefreshing] = useState(false);
   const [selected, setSelected] = useState<string | null>(() => getLastSettingsSelection("mcp", cwd));
@@ -348,7 +350,7 @@ export function McpConfig({
     const controller = new AbortController();
     controllerRef.current = controller;
     setRefreshing(true);
-    const result = await loadMcpOverview(cwd, undefined, controller.signal);
+    const result = await loadMcpOverview(cwd, fetch, controller.signal);
     if (request !== requestRef.current) return;
     setRefreshing(false);
     if (!result.ok) {
@@ -357,7 +359,7 @@ export function McpConfig({
     }
     setLoad({ state: "loaded", data: result.data, ...(result.projectError ? { projectError: result.projectError } : {}) });
     setSelected((current) => pickMcpSelection(mcpServerGroups(result.data, Boolean(cwd)), current));
-  }, [cwd]);
+  }, [cwd, fetch]);
 
   // A new trust decision for the folder (the trust dialog trusted it, or read
   // one made elsewhere) loads the panel again, in place, so the project's
@@ -376,7 +378,7 @@ export function McpConfig({
     const controller = new AbortController();
     saveControllerRef.current = controller;
     setCodemodeSave({ saving: true, error: null, target: "preference" });
-    const result = await saveMcpCodemodePreference(preference, undefined, controller.signal);
+    const result = await saveMcpCodemodePreference(preference, fetch, controller.signal);
     // Closed meanwhile: nothing is left to update.
     if (saveControllerRef.current !== controller) return;
     saveControllerRef.current = null;
@@ -389,14 +391,14 @@ export function McpConfig({
     // Read back what is stored: a save that timed out may still land, and one
     // refused because the file no longer parses should show that file's error.
     void refresh();
-  }, [refresh]);
+  }, [fetch, refresh]);
 
   // The mode and the budget share the choice's save state, so each waits for and is waited for by the same writes.
   const saveCodemodeMode = useCallback(async (mode: CodemodeMode) => {
     const controller = new AbortController();
     saveControllerRef.current = controller;
     setCodemodeSave({ saving: true, error: null, target: "mode" });
-    const result = await saveMcpCodemodeMode(mode, undefined, controller.signal);
+    const result = await saveMcpCodemodeMode(mode, fetch, controller.signal);
     if (saveControllerRef.current !== controller) return;
     saveControllerRef.current = null;
     setCodemodeSave({ saving: false, error: result.ok ? null : result.error, target: "mode" });
@@ -406,13 +408,13 @@ export function McpConfig({
         : current);
     }
     void refresh();
-  }, [refresh]);
+  }, [fetch, refresh]);
 
   const saveCodemodeInlineBudget = useCallback(async (budget: number | null) => {
     const controller = new AbortController();
     saveControllerRef.current = controller;
     setCodemodeSave({ saving: true, error: null, target: "inlineBudget" });
-    const result = await saveMcpCodemodeInlineBudget(budget, undefined, controller.signal);
+    const result = await saveMcpCodemodeInlineBudget(budget, fetch, controller.signal);
     if (saveControllerRef.current !== controller) return;
     saveControllerRef.current = null;
     setCodemodeSave({ saving: false, error: result.ok ? null : result.error, target: "inlineBudget" });
@@ -422,7 +424,7 @@ export function McpConfig({
         : current);
     }
     void refresh();
-  }, [refresh]);
+  }, [fetch, refresh]);
 
   useEffect(() => {
     const testRequests = testRequestsRef.current;
@@ -455,7 +457,7 @@ export function McpConfig({
     const current = loadRef.current;
     // As for a change: the project only when the listing covers it. A global stdio server runs there, else in the home folder.
     const testCwd = current.state === "loaded" && current.data.project ? cwd : null;
-    const result = await postMcpTest({ scope: server.scope, name: server.name }, testCwd);
+    const result = await postMcpTest({ scope: server.scope, name: server.name }, testCwd, fetch);
     // Closed meanwhile: nothing is left to update.
     if (testRequestsRef.current.get(key) !== request) return;
     testRequestsRef.current.delete(key);
@@ -463,7 +465,7 @@ export function McpConfig({
     const listing = loadRef.current;
     const listed = listing.state === "loaded" ? listing.data.servers.find((item) => mcpServerKey(item) === key) : undefined;
     if (mcpTestAnswerOutdates(result, listed)) void refresh();
-  }, [cwd, refresh]);
+  }, [cwd, fetch, refresh]);
 
   // A change answers with the overview read after it, which replaces the
   // listing; a load still on its way may predate the change, so it is dropped.
@@ -490,35 +492,35 @@ export function McpConfig({
     const listing = loadRef.current;
     // As for Test: the project only when the listing covers it.
     const signInCwd = listing.state === "loaded" && listing.data.project ? cwd : null;
-    const result = await postMcpSignIn({ scope: server.scope, name: server.name }, signInCwd);
+    const result = await postMcpSignIn({ scope: server.scope, name: server.name }, signInCwd, fetch);
     if (!mountedRef.current) return;
     setSignIns((runs) => ({ ...runs, [key]: mcpSignInRunAfterStart(result) }));
     if (!result.ok && result.error.reason !== undefined && !result.error.timedOut) void refresh();
-  }, [cwd, refresh]);
+  }, [cwd, fetch, refresh]);
 
   const pasteSignIn = useCallback(async (server: McpServerInfo, flowId: string, value: string) => {
     const key = mcpServerKey(server);
     setSignIns((runs) => (runs[key]?.flow?.flowId === flowId
       ? { ...runs, [key]: { ...runs[key], pasting: true, pasteError: undefined } }
       : runs));
-    const result = await pasteMcpSignIn(flowId, value);
+    const result = await pasteMcpSignIn(flowId, value, fetch);
     if (!mountedRef.current) return;
     setSignIns((runs) => {
       const next = mcpSignInRunAfterPaste(runs[key], flowId, result);
       return next === undefined || next === runs[key] ? runs : { ...runs, [key]: next };
     });
-  }, []);
+  }, [fetch]);
 
   const cancelSignIn = useCallback(async (server: McpServerInfo, flowId: string) => {
     const key = mcpServerKey(server);
     setSignIns((runs) => (runs[key]?.flow?.flowId === flowId ? { ...runs, [key]: { ...runs[key], cancelling: true } } : runs));
-    const result = await cancelMcpSignInFlow(flowId);
+    const result = await cancelMcpSignInFlow(flowId, fetch);
     if (!mountedRef.current) return;
     setSignIns((runs) => {
       const next = mcpSignInRunAfterCancel(runs[key], flowId, result);
       return next === undefined || next === runs[key] ? runs : { ...runs, [key]: next };
     });
-  }, []);
+  }, [fetch]);
 
   // While a sign-in runs, the panel asks where it stands about once a second:
   // the flow moves on by itself when the browser reaches the loopback
@@ -534,7 +536,7 @@ export function McpConfig({
         const [key, flowId] = item.split("\u0001");
         // A paste or cancel answered while this poll is out is newer than what it brings back.
         const sentVersion = signInsRef.current[key]?.version ?? 0;
-        const result = await getMcpSignIn(flowId, undefined, controller.signal);
+        const result = await getMcpSignIn(flowId, fetch, controller.signal);
         if (controller.signal.aborted) return;
         setSignIns((runs) => {
           const next = mcpSignInRunAfterPoll(runs[key], flowId, result, Date.now(), sentVersion);
@@ -547,7 +549,7 @@ export function McpConfig({
       clearTimeout(timer);
       controller.abort();
     };
-  }, [activeFlowsKey, pollRound]);
+  }, [activeFlowsKey, fetch, pollRound]);
 
   // A sign-in that ended changed mcp-auth.json and recorded what connecting
   // found: the overview is read again, for Signed in and the Connection row.
@@ -574,7 +576,7 @@ export function McpConfig({
     const current = loadRef.current;
     // The project only when the listing covers it: a folder the route refused would refuse the change too.
     const writeCwd = current.state === "loaded" && current.data.project ? cwd : null;
-    const result = await postMcpAction(request, writeCwd, undefined, controller.signal);
+    const result = await postMcpAction(request, writeCwd, fetch, controller.signal);
     // Closed meanwhile: nothing is left to update.
     if (actionControllerRef.current !== controller) return undefined;
     actionControllerRef.current = null;
@@ -582,7 +584,7 @@ export function McpConfig({
     if (result.ok) applyOverview(result.data, select?.(result.data));
     else void refresh();
     return result;
-  }, [applyOverview, cwd, refresh]);
+  }, [applyOverview, cwd, fetch, refresh]);
 
   const switchServer = useCallback(async (server: McpServerInfo, enabled: boolean) => {
     const key = mcpServerKey(server);

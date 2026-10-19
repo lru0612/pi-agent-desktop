@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useI18n } from "@/hooks/useI18n";
+import { useBackendApi } from "./remote/BackendScope";
 import type { CodemodePreference } from "@/lib/codemode-settings";
 import type { NonChatModelInfo, NonChatModels, NonChatModelType } from "@/lib/nonchat-models";
 import {
@@ -42,6 +43,7 @@ const price = (value: number) => `$${Number(value.toPrecision(3))}`;
  * which exist, which providers are signed in, and whether Code mode lets sessions call them.
  */
 export function NonChatModelsDetail({ onOpenMcp }: { onOpenMcp?: () => void }) {
+  const { fetch } = useBackendApi();
   const { t } = useI18n();
   const [data, setData] = useState<NonChatModelsResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -57,7 +59,7 @@ export function NonChatModelsDetail({ onOpenMcp }: { onOpenMcp?: () => void }) {
       .then((body) => { if (!cancelled) setData(body); })
       .catch((e: unknown) => { if (!cancelled) setError(e instanceof Error ? e.message : String(e)); });
     return () => { cancelled = true; };
-  }, []);
+  }, [fetch]);
 
   return (
     <ConfigDetailStack className="nonchat-models">

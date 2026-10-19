@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useI18n } from "@/hooks/useI18n";
 import { formatUpdatedTime } from "@/lib/i18n/format";
+import { useBackendApi } from "./remote/BackendScope";
 import { isProviderUsageId } from "@/lib/provider-usage-ids";
 
 type UsageBucket = {
@@ -31,6 +32,9 @@ export function ProviderUsageSummary({ providerId, enabled }: { providerId: stri
 }
 
 function ProviderUsageContent({ providerId, enabled }: { providerId: string; enabled: boolean }) {
+  const { fetch, host } = useBackendApi();
+  // Never show one backend's account usage while configuring another.
+  const storageKey = `${STORAGE_PREFIX}${JSON.stringify([host, providerId])}`;
   const [snapshot, setSnapshot] = useState<UsageResponse | null>(null);
   const [querying, setQuerying] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -43,7 +47,7 @@ function ProviderUsageContent({ providerId, enabled }: { providerId: string; ena
     setRefreshDone(false);
     setSnapshot(null);
     try {
-      const cached = localStorage.getItem(`${STORAGE_PREFIX}${providerId}`);
+      const cached = localStorage.getItem(storageKey);
       if (cached) {
         const parsed = JSON.parse(cached) as UsageResponse;
         if (parsed?.status === "ready" && parsed.report && Array.isArray(parsed.report.buckets) && Array.isArray(parsed.report.metrics)) {
@@ -51,13 +55,13 @@ function ProviderUsageContent({ providerId, enabled }: { providerId: string; ena
         }
       }
     } catch {
-      try { localStorage.removeItem(`${STORAGE_PREFIX}${providerId}`); } catch {}
+      try { localStorage.removeItem(storageKey); } catch {}
     }
     setError(null);
     return () => {
       if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
     };
-  }, [providerId]);
+  }, [storageKey]);
 
   const query = useCallback(async () => {
     setQuerying(true);
@@ -72,7 +76,7 @@ function ProviderUsageContent({ providerId, enabled }: { providerId: string; ena
       if (!response.ok) throw new Error(result.error ?? `HTTP ${response.status}`);
       if (result.status === "ready") {
         setSnapshot(result);
-        try { localStorage.setItem(`${STORAGE_PREFIX}${providerId}`, JSON.stringify(result)); } catch {}
+        try { localStorage.setItem(storageKey, JSON.stringify(result)); } catch {}
         setRefreshDone(true);
         if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
         refreshTimerRef.current = setTimeout(() => setRefreshDone(false), 2000);
@@ -84,7 +88,7 @@ function ProviderUsageContent({ providerId, enabled }: { providerId: string; ena
     } finally {
       setQuerying(false);
     }
-  }, [providerId, t]);
+  }, [fetch, providerId, storageKey, t]);
 
   const report = snapshot?.status === "ready" ? snapshot.report : undefined;
   return (

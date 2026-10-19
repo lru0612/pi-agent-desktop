@@ -12,6 +12,8 @@
  * Stored in localStorage; best-effort (silently ignored when unavailable).
  */
 
+import { hostedProjectKey } from "./remote/project-identity.ts";
+
 const STORAGE_KEY = "pi-web:last-open-by-workspace";
 
 interface StorageLike {
@@ -93,6 +95,7 @@ export function workspaceKeyOf(session: {
   cwd: string;
   projectRoot?: string | null;
   projectKey?: string | null;
+  host?: string | null;
 }): string {
-  return session.projectKey ?? session.projectRoot ?? session.cwd;
+  return hostedProjectKey(session.projectKey ?? session.projectRoot ?? session.cwd, session.host);
 }

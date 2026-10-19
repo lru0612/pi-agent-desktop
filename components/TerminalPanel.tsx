@@ -1,12 +1,15 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import { useI18n } from "@/hooks/useI18n";
 import { createTerminalWriter, terminalRequest } from "@/lib/terminal-client";
 import type { TerminalEvent } from "@/lib/terminal-manager";
 import type { TerminalTab } from "./terminal-tab-state";
+import { createBackendApi } from "@/lib/remote/scoped-api";
+import { localFetch } from "@/lib/remote/client";
+import { remoteClientStore } from "@/lib/remote/client-store";
 
 interface Props {
   tab: TerminalTab;
@@ -19,6 +22,11 @@ interface Props {
 export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }: Props) {
   const { t } = useI18n();
   const { id, cwd, restored } = tab;
+  const backend = useMemo(() => createBackendApi(
+    tab.host !== undefined ? tab.host : remoteClientStore.hostOfTerminal(id) ?? null,
+    localFetch,
+    () => window.location.origin,
+  ), [id, tab.host]);
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const startRef = useRef<Promise<void>>(Promise.resolve());
@@ -79,7 +87,7 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
       terminal.options.disableStdin = true;
       setError(reason.message);
       setStatus("error");
-    });
+    }, backend.fetch);
     writerRef.current = writer;
     const onData = terminal.onData((data) => {
       if (connected && !exited && !inputFailed) writer.write(data);
@@ -97,7 +105,7 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
     const connect = () => {
       if (disposed || exited || !navigator.onLine) return;
       events?.close();
-      events = new EventSource(`/api/terminal/${encodeURIComponent(id)}/events${offset === undefined ? "" : `?after=${offset}`}`);
+      events = new EventSource(backend.url(`/api/terminal/${encodeURIComponent(id)}/events${offset === undefined ? "" : `?after=${offset}`}`));
       events.onmessage = (message) => {
         const event = JSON.parse(message.data) as TerminalEvent;
         if (event.type === "output") {
@@ -135,13 +143,13 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
       fitAndResize();
       if (restored || reconnectKey > 0) {
         // Restoring a tab must never silently launch a replacement shell.
-        await terminalRequest(`/api/terminal/${encodeURIComponent(id)}`);
+        await terminalRequest(`/api/terminal/${encodeURIComponent(id)}`, undefined, backend.fetch);
       } else {
         await terminalRequest("/api/terminal", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ id, cwd, cols: terminal.cols, rows: terminal.rows }),
-        });
+        }, backend.fetch);
       }
       connect();
     })().catch((reason: Error) => {
@@ -175,7 +183,7 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
       terminal.dispose();
       terminalRef.current = null;
     };
-  }, [id, cwd, restored, reconnectKey]);
+  }, [id, cwd, restored, reconnectKey, backend]);
 
   useEffect(() => {
     if (active) terminalRef.current?.focus();
@@ -188,7 +196,7 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
     void (async () => {
       await startRef.current;
       await writerRef.current?.stop();
-      await terminalRequest(`/api/terminal/${encodeURIComponent(id)}`, { method: "DELETE", keepalive: true });
+      await terminalRequest(`/api/terminal/${encodeURIComponent(id)}`, { method: "DELETE", keepalive: true }, backend.fetch);
       if (!cancelled) callbacksRef.current.onClosed();
     })().catch((reason: Error) => {
       if (cancelled) return;
@@ -197,7 +205,7 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
       callbacksRef.current.onCloseError();
     });
     return () => { cancelled = true; };
-  }, [id, tab.closing]);
+  }, [id, tab.closing, backend]);
 
   return (
     <section className="terminal-panel" aria-label={t("terminal.title")}>

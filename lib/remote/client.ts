@@ -9,7 +9,8 @@
  * Precedent for this approach: demo/mock/install.ts.
  */
 import { remoteClientStore } from "./client-store";
-import { resolveApiRequest, stripCwdFromJsonBody, type RouteDecision } from "./router";
+import { resolveApiRequest } from "./router";
+import { createRoutedFetch, type RoutedRequest } from "./fetch-router";
 import type { HostedSessionInfo, RemoteHostSnapshot, RemoteHostsFrameExtra } from "./types";
 
 const HOST_POLL_MS = 15_000;
@@ -17,7 +18,7 @@ const HOST_POLL_MS = 15_000;
 let installed = false;
 let originalFetch: typeof fetch | null = null;
 
-function decide(url: string, body?: unknown): RouteDecision {
+function decide(url: string, body?: unknown) {
   return resolveApiRequest(url, body, remoteClientStore, window.location.origin);
 }
 
@@ -32,36 +33,34 @@ export function localFetch(input: RequestInfo | URL, init?: RequestInit): Promis
   return (originalFetch ?? fetch)(input, init);
 }
 
-function inputUrl(input: RequestInfo | URL): string {
-  if (typeof input === "string") return input;
-  if (input instanceof URL) return input.href;
-  return input.url;
-}
-
-function pathnameOf(url: string): string {
+async function learnResponse({ decision, path, method }: RoutedRequest, response: Response): Promise<void> {
+  if (!response.ok) return;
+  const list = decision.kind === "aggregate" && path === "/api/sessions";
+  const search = decision.kind === "aggregate" && path === "/api/sessions/search";
+  const creates = method === "POST" && (path.startsWith("/api/agent/") || path === "/api/terminal");
+  if (!list && !search && !creates) return;
   try {
-    return new URL(url, window.location.origin).pathname;
+    const data = await response.clone().json();
+    if (list && Array.isArray(data.sessions)) remoteClientStore.recordSessions(data.sessions);
+    if (search && Array.isArray(data.results)) {
+      for (const hit of data.results) {
+        const session = hit.session as HostedSessionInfo | undefined;
+        if (session) remoteClientStore.recordSession(session.id, session.host ?? null);
+      }
+    }
+    if (creates) {
+      if (path === "/api/terminal" && typeof data.id === "string") remoteClientStore.recordTerminal(data.id, decision.host);
+      for (const id of [data.sessionId, data.data?.newSessionId, data.data?.sessionId]) {
+        if (typeof id === "string") remoteClientStore.recordSession(id, decision.host);
+      }
+    }
   } catch {
-    return "";
+    // Malformed responses are still delivered to the caller's own error UI.
   }
 }
 
-function tapResponse(decision: RouteDecision, originalPath: string, method: string, response: Promise<Response>): void {
-  if (decision.kind === "aggregate" && pathnameOf(decision.url) === "/api/remote-hosts/aggregate/sessions") {
-    void response.then((res) => (res.ok ? res.clone().json() : null)).then((data: { sessions?: HostedSessionInfo[] } | null) => {
-      if (data?.sessions) remoteClientStore.recordSessions(data.sessions);
-    }).catch(() => {});
-    return;
-  }
-  if (method === "POST" && originalPath === "/api/agent/new") {
-    void response.then((res) => (res.ok ? res.clone().json() : null)).then((data: { sessionId?: unknown } | null) => {
-      if (typeof data?.sessionId === "string") remoteClientStore.recordSession(data.sessionId, decision.host);
-    }).catch(() => {});
-  }
-}
-
-function recordRequest(decision: RouteDecision, originalPath: string, method: string, body: unknown): void {
-  if (method === "POST" && originalPath === "/api/terminal" && typeof body === "string") {
+function recordRequest({ decision, path, method, body }: RoutedRequest): void {
+  if (method === "POST" && path === "/api/terminal" && typeof body === "string") {
     try {
       const id = (JSON.parse(body) as { id?: unknown }).id;
       if (typeof id === "string") remoteClientStore.recordTerminal(id, decision.host);
@@ -72,6 +71,42 @@ function recordRequest(decision: RouteDecision, originalPath: string, method: st
 }
 
 let hostsTimer: ReturnType<typeof setInterval> | null = null;
+/** connectedAt of the connection whose folder grants were last restored, per host. */
+const restoredConnections = new Map<string, number>();
+const restoringConnections = new Map<string, number>();
+
+/**
+ * Apply a host list from the server. A remote server keeps its folder grants
+ * (allowFileRoot) in memory only, so after every new connection — which may be
+ * a restarted server — folders picked there without any session yet are
+ * granted again; otherwise their files and terminals would be refused.
+ */
+function applyHosts(hosts: RemoteHostSnapshot[]): void {
+  remoteClientStore.setHosts(hosts);
+  for (const host of hosts) {
+    if (host.status !== "online" || !host.connectedAt) continue;
+    if (restoredConnections.get(host.id) === host.connectedAt || restoringConnections.get(host.id) === host.connectedAt) continue;
+    const connection = host.connectedAt;
+    restoringConnections.set(host.id, connection);
+    // Mark restored only after every grant succeeded. A temporarily failing
+    // request is retried on the next snapshot, not silently forgotten forever.
+    void Promise.all(remoteClientStore.pickedRootsOf(host.id).map(async (root) => {
+      const response = await localFetch(`/api/r/${encodeURIComponent(host.id)}/cwd/validate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cwd: root }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      return response.ok;
+    })).then((results) => {
+      if (results.every(Boolean) && remoteClientStore.host(host.id)?.connectedAt === connection) {
+        restoredConnections.set(host.id, connection);
+      }
+    }).catch(() => {}).finally(() => {
+      if (restoringConnections.get(host.id) === connection) restoringConnections.delete(host.id);
+    });
+  }
+}
 
 /** Refresh the host list from the local server (also used after host actions). */
 export async function refreshRemoteHosts(): Promise<RemoteHostSnapshot[]> {
@@ -79,7 +114,7 @@ export async function refreshRemoteHosts(): Promise<RemoteHostSnapshot[]> {
     const response = await localFetch("/api/remote-hosts", { cache: "no-store" });
     if (!response.ok) return remoteClientStore.getSnapshot().hosts;
     const data = await response.json() as { hosts?: RemoteHostSnapshot[] };
-    remoteClientStore.setHosts(data.hosts ?? []);
+    applyHosts(data.hosts ?? []);
     return data.hosts ?? [];
   } catch {
     return remoteClientStore.getSnapshot().hosts;
@@ -95,24 +130,14 @@ export function installRemoteRouter(): void {
 
   originalFetch = window.fetch.bind(window);
   const realFetch = originalFetch;
-  window.fetch = (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-    const url = inputUrl(input);
-    const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
-    const body = init?.body;
-    const decision = decide(url, body);
-    if (!decision.changed) return realFetch(input, init);
-    const originalPath = pathnameOf(url);
-    recordRequest(decision, originalPath, method, body);
-    let nextInit = init;
-    if (decision.stripBodyCwd && typeof body === "string") {
-      nextInit = { ...init, body: stripCwdFromJsonBody(body) };
-    }
-    const response = input instanceof Request
-      ? realFetch(new Request(decision.url, input), nextInit)
-      : realFetch(decision.url, nextInit);
-    tapResponse(decision, originalPath, method, response);
-    return response;
-  };
+  window.fetch = createRoutedFetch({
+    origin: () => window.location.origin,
+    scope: () => remoteClientStore.currentHost,
+    resolve: decide,
+    transport: realFetch,
+    onRequest: recordRequest,
+    onResponse: learnResponse,
+  });
 
   const OriginalEventSource = window.EventSource;
   if (OriginalEventSource) {
@@ -120,14 +145,24 @@ export function installRemoteRouter(): void {
       constructor(url: string | URL, init?: EventSourceInit) {
         const decision = decide(String(url));
         super(decision.url, init);
-        if (pathnameOf(decision.url) === "/api/remote-hosts/aggregate/running-events") {
+        const streamPath = new URL(decision.url, window.location.origin).pathname;
+        if (streamPath === "/api/remote-hosts/aggregate/running-events") {
           this.addEventListener("message", (event: MessageEvent<string>) => {
             try {
               const data = JSON.parse(event.data) as RemoteHostsFrameExtra;
-              if (Array.isArray(data.remoteHosts)) remoteClientStore.setHosts(data.remoteHosts);
+              if (Array.isArray(data.remoteHosts)) applyHosts(data.remoteHosts);
             } catch {
               // not ours
             }
+          });
+        } else if (/\/agent\/[^/]+\/events$/.test(streamPath)) {
+          this.addEventListener("message", (event: MessageEvent<string>) => {
+            try {
+              const data = JSON.parse(event.data) as { type?: string; sessionId?: string };
+              if (data.type === "session_replaced" && typeof data.sessionId === "string") {
+                remoteClientStore.recordSession(data.sessionId, decision.host);
+              }
+            } catch { /* a malformed frame is handled by the session consumer */ }
           });
         }
       }

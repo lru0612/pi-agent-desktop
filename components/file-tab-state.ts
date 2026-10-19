@@ -4,6 +4,7 @@ import type { Tab } from "./TabBar";
 interface OpenFileTabInput {
   fileName: string;
   filePath: string;
+  host?: string | null;
   modeHint?: "diff";
   page?: number;
   sourceSessionId?: string | null;
@@ -17,6 +18,7 @@ export function openFileTab(tabs: Tab[], input: OpenFileTabInput): Tab[] {
       id: input.tabId,
       label: input.fileName,
       filePath: input.filePath,
+      ...(input.host !== undefined ? { host: input.host } : {}),
       sourceSessionId: input.sourceSessionId,
       initialDisplayMode: input.modeHint,
       page: input.page,

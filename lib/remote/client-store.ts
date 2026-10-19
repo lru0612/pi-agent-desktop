@@ -9,19 +9,28 @@
  */
 import type { HostedSessionInfo, RemoteHostSnapshot } from "./types";
 import type { RouterStateView } from "./router";
+import { APP_PREF_KEYS, getPrefJson, setPrefJson } from "../app-prefs.ts";
+import { resolveInitialNavigation, type PersistedWorkspace } from "../workspace-state.ts";
+import { withTabOpen } from "../initial-navigation.ts";
+import { getTabOpen } from "../tab-session.ts";
 
-const SESSION_HOSTS_KEY = "pi-remote:session-hosts:v1";
-const TERMINAL_HOSTS_KEY = "pi-remote:terminal-hosts:v1";
-const REMOTE_ROOTS_KEY = "pi-remote:roots:v1";
 const MAX_SESSION_HOSTS = 3000;
 const MAX_TERMINAL_HOSTS = 200;
+const validHost = (value: unknown): value is string => typeof value === "string" && /^[a-z0-9][a-z0-9-]{0,31}$/.test(value) && value !== "local";
+
+/** Explicitly opened remote project, separate from its allowed file roots. */
+export interface RemoteProjectLocation {
+  host: string;
+  cwd: string;
+  projectRoot: string;
+  projectKey?: string;
+}
 
 export interface RemoteClientSnapshot {
   hosts: RemoteHostSnapshot[];
+  projects: RemoteProjectLocation[];
   hostsLoaded: boolean;
   currentHost: string | null;
-  configHost: string | null | undefined;
-  browseHost: string | null;
   /** Bumped when routing knowledge (roots/sessions) changes. */
   routingVersion: number;
 }
@@ -41,23 +50,24 @@ function isWithin(path: string, root: string): boolean {
   return path === root || path.startsWith(root.endsWith("/") ? root : `${root}/`);
 }
 
-class RemoteClientStore implements RouterStateView {
+export class RemoteClientStore implements RouterStateView {
   private listeners = new Set<Listener>();
   private snapshot: RemoteClientSnapshot = {
     hosts: [],
+    projects: [],
     hostsLoaded: false,
     currentHost: null,
-    configHost: undefined,
-    browseHost: null,
     routingVersion: 0,
   };
   private sessionHosts = new Map<string, string>();
   private localSessionIds = new Set<string>();
-  private terminalHosts = new Map<string, string>();
+  private terminalHosts = new Map<string, string | null>();
   private remoteRoots = new Map<string, Set<string>>();
+  /** Roots chosen in the remote folder picker; re-granted after every (re)connect. */
+  private pickedRoots = new Map<string, Set<string>>();
   private localRoots = new Set<string>();
   private loaded = false;
-  private workspace: { sessionId: string | null; cwd: string | null } = { sessionId: null, cwd: null };
+  private workspace: { sessionId: string | null; cwd: string | null; host?: string | null } = { sessionId: null, cwd: null };
   /** Host the user last picked for a project root that exists on several backends. */
   private pinnedHosts = new Map<string, string | null>();
 
@@ -79,49 +89,49 @@ class RemoteClientStore implements RouterStateView {
     return this.snapshot.currentHost;
   }
 
-  get configHost(): string | null | undefined {
-    return this.snapshot.configHost;
-  }
-
-  get browseHost(): string | null {
-    return this.snapshot.browseHost;
-  }
-
   load(): void {
-    if (this.loaded || typeof localStorage === "undefined") return;
+    if (this.loaded || typeof window === "undefined") return;
     this.loaded = true;
-    try {
-      const sessions = JSON.parse(localStorage.getItem(SESSION_HOSTS_KEY) ?? "[]") as Array<[string, string]>;
-      for (const [id, host] of sessions) this.sessionHosts.set(id, host);
-    } catch {
-      // ignore corrupt cache
+    const sessions = getPrefJson<unknown>(APP_PREF_KEYS.remoteSessionHosts);
+    if (Array.isArray(sessions)) for (const pair of sessions.slice(-MAX_SESSION_HOSTS)) {
+      if (Array.isArray(pair) && typeof pair[0] === "string" && validHost(pair[1])) this.sessionHosts.set(pair[0], pair[1]);
     }
-    try {
-      const roots = JSON.parse(localStorage.getItem(REMOTE_ROOTS_KEY) ?? "{}") as Record<string, string[]>;
-      for (const [host, list] of Object.entries(roots)) this.remoteRoots.set(host, new Set(list));
-    } catch {
-      // ignore corrupt cache
+    for (const [key, target] of [
+      [APP_PREF_KEYS.remoteRoots, this.remoteRoots],
+      [APP_PREF_KEYS.remotePickedRoots, this.pickedRoots],
+    ] as const) {
+      const roots = getPrefJson<unknown>(key);
+      if (roots && typeof roots === "object" && !Array.isArray(roots)) {
+        for (const [host, paths] of Object.entries(roots)) {
+          if (validHost(host) && Array.isArray(paths)) target.set(host, new Set(paths.filter((path): path is string => typeof path === "string")));
+        }
+      }
     }
-    try {
-      const terminals = JSON.parse(localStorage.getItem(TERMINAL_HOSTS_KEY) ?? "[]") as Array<[string, string]>;
-      for (const [id, host] of terminals) this.terminalHosts.set(id, host);
-    } catch {
-      // ignore corrupt cache
+    const terminals = getPrefJson<unknown>(APP_PREF_KEYS.remoteTerminalHosts);
+    if (Array.isArray(terminals)) for (const pair of terminals.slice(-MAX_TERMINAL_HOSTS)) {
+      if (Array.isArray(pair) && typeof pair[0] === "string" && (pair[1] === null || validHost(pair[1]))) this.terminalHosts.set(pair[0], pair[1]);
     }
+    const projects = getPrefJson<unknown>(APP_PREF_KEYS.remoteProjects);
+    if (Array.isArray(projects)) this.snapshot = { ...this.snapshot, projects: projects.filter((p) =>
+      p && validHost(p.host) && typeof p.cwd === "string" && typeof p.projectRoot === "string") };
+
+    // Match AppShell's URL > desktop workspace > per-tab restore ordering,
+    // before any child can issue its first API request.
+    const desktop = "__TAURI_INTERNALS__" in window;
+    const navigation = withTabOpen(resolveInitialNavigation(
+      new URL(window.location.href).searchParams,
+      desktop ? getPrefJson<PersistedWorkspace>(APP_PREF_KEYS.workspace) : null,
+    ), getTabOpen());
+    if (navigation.host !== undefined) this.selectWorkspace(navigation.sessionId, navigation.requestedCwd, navigation.host);
+    else this.setWorkspace(navigation.sessionId, navigation.requestedCwd);
   }
 
   private persist(): void {
-    if (typeof localStorage === "undefined") return;
-    try {
-      const entries = [...this.sessionHosts.entries()].slice(-MAX_SESSION_HOSTS);
-      localStorage.setItem(SESSION_HOSTS_KEY, JSON.stringify(entries));
-      const roots: Record<string, string[]> = {};
-      for (const [host, set] of this.remoteRoots) roots[host] = [...set];
-      localStorage.setItem(REMOTE_ROOTS_KEY, JSON.stringify(roots));
-      localStorage.setItem(TERMINAL_HOSTS_KEY, JSON.stringify([...this.terminalHosts.entries()].slice(-MAX_TERMINAL_HOSTS)));
-    } catch {
-      // storage full / private mode
-    }
+    setPrefJson(APP_PREF_KEYS.remoteSessionHosts, [...this.sessionHosts.entries()].slice(-MAX_SESSION_HOSTS));
+    setPrefJson(APP_PREF_KEYS.remoteRoots, Object.fromEntries([...this.remoteRoots].map(([host, roots]) => [host, [...roots]])));
+    setPrefJson(APP_PREF_KEYS.remotePickedRoots, Object.fromEntries([...this.pickedRoots].map(([host, roots]) => [host, [...roots]])));
+    setPrefJson(APP_PREF_KEYS.remoteTerminalHosts, [...this.terminalHosts.entries()].slice(-MAX_TERMINAL_HOSTS));
+    setPrefJson(APP_PREF_KEYS.remoteProjects, this.snapshot.projects);
   }
 
   // ------------------------------------------------------------ hosts
@@ -131,25 +141,14 @@ class RemoteClientStore implements RouterStateView {
     const same = previous.length === hosts.length && previous.every((host, index) => {
       const next = hosts[index]!;
       return host.id === next.id && host.status === next.status && host.phase === next.phase
-        && host.label === next.label && host.error?.code === next.error?.code && host.home === next.home
+        && host.label === next.label && host.error?.code === next.error?.code && host.error?.detail === next.error?.detail
+        && host.home === next.home && host.connectedAt === next.connectedAt && host.version === next.version
         && host.busySessionIds?.length === next.busySessionIds?.length;
     });
     if (same && this.snapshot.hostsLoaded) return;
-    // Forget routing knowledge of hosts that were removed.
-    const ids = new Set(hosts.map((host) => host.id));
-    let routingChanged = false;
-    for (const host of [...this.remoteRoots.keys()]) {
-      if (!ids.has(host)) {
-        this.remoteRoots.delete(host);
-        routingChanged = true;
-      }
-    }
-    if (routingChanged) this.persist();
-    this.update({
-      hosts,
-      hostsLoaded: true,
-      routingVersion: this.snapshot.routingVersion + (routingChanged ? 1 : 0),
-    });
+    // Keep ownership tombstones for open tabs after a host is removed: a
+    // missing host must produce 404, never fall back to a same-named local file.
+    this.update({ hosts, hostsLoaded: true });
     this.recomputeCurrentHost();
   }
 
@@ -172,6 +171,11 @@ class RemoteClientStore implements RouterStateView {
 
   ownerOfPath(rawPath: string): string | null | undefined {
     const path = trimPath(rawPath);
+    if (this.workspace.host !== undefined && this.workspace.cwd && isWithin(path, trimPath(this.workspace.cwd))) {
+      // Explicit workspace selection beats a longer root learned on another
+      // machine. Paths alone never identify a backend.
+      return this.workspace.host;
+    }
     let bestLength = -1;
     let owners: Array<string | null> = [];
     const consider = (root: string, owner: string | null) => {
@@ -227,6 +231,7 @@ class RemoteClientStore implements RouterStateView {
           }
         }
       } else {
+        if (this.sessionHosts.delete(session.id)) changed = true;
         this.localSessionIds.add(session.id);
         for (const root of roots) nextLocalRoots.add(root);
       }
@@ -245,14 +250,15 @@ class RemoteClientStore implements RouterStateView {
       this.sessionHosts.set(id, host);
       this.persist();
     } else {
+      this.sessionHosts.delete(id);
       this.localSessionIds.add(id);
     }
+    this.recomputeCurrentHost();
   }
 
   recordTerminal(id: string, host: string | null): void {
     // Persisted so restored terminal tabs reach their host after a reload.
-    if (host) this.terminalHosts.set(id, host);
-    else this.terminalHosts.delete(id);
+    this.terminalHosts.set(id, host);
     this.persist();
   }
 
@@ -264,9 +270,28 @@ class RemoteClientStore implements RouterStateView {
       this.remoteRoots.set(host, set);
     }
     set.add(trimPath(root));
+    let picked = this.pickedRoots.get(host);
+    if (!picked) {
+      picked = new Set();
+      this.pickedRoots.set(host, picked);
+    }
+    picked.add(trimPath(root));
     this.persist();
     this.update({ routingVersion: this.snapshot.routingVersion + 1 });
     this.recomputeCurrentHost();
+  }
+
+  /** A picked worktree is still one project row under its repository root. */
+  rememberProject(project: RemoteProjectLocation): void {
+    const projects = this.snapshot.projects.filter((item) => item.host !== project.host || item.projectRoot !== project.projectRoot);
+    projects.push(project);
+    this.update({ projects, routingVersion: this.snapshot.routingVersion + 1 });
+    this.persist();
+  }
+
+  /** Folders picked on `host`: the remote only remembers its grants in memory. */
+  pickedRootsOf(host: string): string[] {
+    return [...(this.pickedRoots.get(host) ?? [])];
   }
 
   /** Remote host of a project root, or null for local. */
@@ -279,25 +304,28 @@ class RemoteClientStore implements RouterStateView {
 
   // ------------------------------------------------------------ workspace / scope
 
+  /** Called synchronously by selection handlers, before descendant effects run. */
+  selectWorkspace(sessionId: string | null, cwd: string | null, host: string | null): void {
+    if (sessionId) this.recordSession(sessionId, host);
+    if (cwd) this.pinnedHosts.set(trimPath(cwd), host);
+    this.workspace = { sessionId, cwd, host };
+    if (this.snapshot.currentHost !== host) this.update({ currentHost: host });
+  }
+
   setWorkspace(sessionId: string | null, cwd: string | null): void {
-    this.workspace = { sessionId, cwd };
+    if (this.workspace.sessionId !== sessionId || this.workspace.cwd !== cwd) {
+      this.workspace = { sessionId, cwd };
+    }
     this.recomputeCurrentHost();
   }
 
   private recomputeCurrentHost(): void {
     const { sessionId, cwd } = this.workspace;
-    let host: string | null | undefined = sessionId ? this.hostOfSession(sessionId) : undefined;
+    let host: string | null | undefined = this.workspace.host;
+    if (host === undefined && sessionId) host = this.hostOfSession(sessionId);
     if (host === undefined && cwd) host = this.ownerOfPath(cwd);
     const next = host ?? null;
     if (next !== this.snapshot.currentHost) this.update({ currentHost: next });
-  }
-
-  setConfigHost(host: string | null | undefined): void {
-    if (host !== this.snapshot.configHost) this.update({ configHost: host });
-  }
-
-  setBrowseHost(host: string | null): void {
-    if (host !== this.snapshot.browseHost) this.update({ browseHost: host });
   }
 }
 

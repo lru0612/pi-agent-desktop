@@ -36,6 +36,7 @@ import {
   ConfigStatusDot,
   ConfigSwitch,
 } from "./SettingsUi";
+import { useBackendApi } from "./remote/BackendScope";
 import { ModelSelector } from "./ModelSelector";
 import { projectTrustReloadKey } from "./settings-ui-helpers";
 
@@ -159,6 +160,7 @@ export function AgentsConfig({
   /** The page's trust status for `cwd`; a new decision loads the model list again. */
   trust?: ProjectTrustStatus | null;
 }) {
+  const { fetch } = useBackendApi();
   const isMobile = useIsMobile();
   const { t } = useI18n();
   const [profiles, setProfiles] = useState<SubagentProfile[]>([]);
@@ -218,7 +220,7 @@ export function AgentsConfig({
     } finally {
       setLoading(false);
     }
-  }, [cwd]);
+  }, [cwd, fetch]);
 
   useEffect(() => {
     void loadProfiles();
@@ -248,7 +250,7 @@ export function AgentsConfig({
       }
     })();
     return () => controller.abort();
-  }, []);
+  }, [fetch]);
 
   useEffect(() => {
     if (selectedKey) setLastSettingsSelection("agents", selectedKey, cwd);
@@ -279,7 +281,7 @@ export function AgentsConfig({
       }
     })();
     return () => controller.abort();
-  }, [cwd, trustKey]);
+  }, [cwd, fetch, trustKey]);
 
   const selectProfile = (profile: SubagentProfile) => {
     setSelectedKey(profileKey(profile));
