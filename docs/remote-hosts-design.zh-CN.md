@@ -1,7 +1,7 @@
 # 远程主机（SSH）设计文档
 
-> 状态：已实现（M0–M3），分支 `feat/remote-hosts` · 基于 `abcwyc/pi-agent-desktop@10cc27f`（0.7.3）
-> 使用说明见 [remote-hosts.zh-CN.md](remote-hosts.zh-CN.md)。实现与本文的差异：定时任务和全文搜索暂只显示本机；无界面服务端由桌面端直接上传本机打包的服务端目录，没有单独的发布包。
+> 状态：M0–M3 已实现，M4 部分实现，分支 `feat/remote-hosts` · 基于 `abcwyc/pi-agent-desktop@10cc27f`（0.7.3）
+> 使用说明见 [remote-hosts.zh-CN.md](remote-hosts.zh-CN.md)。§1–§12 是最初的设计；实际实现与它不同的地方集中记录在 [§13 实现记录](#13-实现记录)。
 
 ## 1. 目标
 
@@ -357,6 +357,53 @@ HTML 预览里的相对路径资源（`./x.css`）在 `/api/r/devbox/files/<dir>
 5. **HTTP/1.1 连接数**：当前会话事件流、终端、文件监听都经过本地同一源，与现状相同；新增的只有一条汇总流。
 6. **上游接受度**：#114 被直接关闭且未说明原因。动手前应在上游开 issue 确认方向，并请求在每次发版时附带无界面服务端包。
 7. **`DirectoryPicker` 的上游状态**：`AGENTS.md:227` 把它列为上游拒绝合并的界面，但本仓库在用。复用前需确认它是否属于 fork 自有。
+
+## 13. 实现记录
+
+按主题记录实际做法，只写与 §1–§12 不同或设计里没有写到的地方。
+
+### 13.1 远程端与版本
+
+- **没有单独的发布包**：本机把 `src-tauri/resources/server`（`npm run desktop:prepare` 的产物）打成 tar 经 `ssh` 流式上传。去掉了 sharp 和非目标平台的二进制；node-pty 自带 linux x64/arm64 预编译文件。远程使用自己的 Node（≥ 22.19），不自动安装；缺少时主机状态为 `node_missing`。
+- **版本号** = `<appVersion>-<BUILD_ID 前 8 位>`，比 §8 的 `appVersion` 更严：本机每次构建都是新版本，接口一定一致。已安装的版本目录不可变（安装用临时目录 + 锁，完整后才发布）。
+- **替换策略**：连接时用 `start --replace-if-idle`，只有经密码验证的旧服务确认空闲才替换；健康检查 / 鉴权无法确认时一律不替换（fail closed）。有任务在跑时主机状态为 `other_version_busy`，横幅提供「立即升级」（`--replace`）。**已知空隙**：「确认空闲 → 停止」不是原子的，两步之间另一个客户端刚启动的任务会被中断；彻底解决需要远程的 drain 接口。
+- **旧版本清理**：每次连上后后台执行 `prune --min-age-hours=24 <当前版本>`：不删正在运行的版本，也不删 24 小时内安装的版本（另一个窗口可能正在安装或启动它）。`state.json` 无法读取时什么都不删。
+- **常驻方式**：只用 detached 子进程（忽略 SIGHUP）；没有用 `systemd-run --user`，实测的服务器上没有用户总线。
+- **生命周期锁与孤儿服务**：`start`/`stop`/`prune` 在 `~/.pi-remote/lifecycle.lock` 下串行（持有者进程已死或超过 5 分钟即视为失效），两个客户端同时连接不会各启一个服务。启动器另在 `~/.pi-remote/servers/<pid>.json` 登记自己；每次 `start` 成功后，对登记表里非当前的服务逐个用密码验证身份（pid 一致且 headless），空闲则结束，有任务则保留到以后。`start` 在 120 秒内未能验证新服务时会结束它，不留半启动的进程。开发期间旧版本代码（没有锁和登记表）曾在实测主机上留下 24 个空闲的孤儿服务（约 3.7 GB 内存），这是加入上述机制的直接原因。
+
+### 13.2 本地服务端
+
+- 没有 `GET /api/remote-hosts/events`。汇总流是 `GET /api/remote-hosts/aggregate/running-events`：帧格式与上游 `agent/running/events` 相同，另带 `remoteHosts`（主机状态）。前端另每 15 秒拉一次 `/api/remote-hosts`。
+- 汇总接口：`aggregate/sessions`、`aggregate/running`、`aggregate/running-events`、`aggregate/search`（全文搜索含所有在线主机，单台主机 8 秒超时不影响其他结果）。离线主机的会话列表来自 `<agentDir>/pi-desktop/remote-cache/<id>.sessions.json`。
+- 会话 id 在两个后端重复（两台机器共用同一个会话目录时才会发生）时，先列出的一方（本机优先）胜出，另一方不显示。没有把会话标识改成 `(host, id)`：那要改动 URL、各处的 `selectedSessionId` 和上游会话接口。
+- 代理（`lib/remote/proxy.ts`、`proxy-policy.ts`）补充了：拒绝编码后的路径穿越；重定向只允许同一主机的 `/api/` 命名空间；剥离 hop-by-hop / CORS / Origin / 桌面令牌等头；保留 gzip、Range、SSE 原始流；请求体上限 128 MiB（可重放，用于 401 后重新登录重试）。离线返回 `503 {"error":"remote_offline"}`，传输失败返回 `502 {"error":"remote_unreachable"}`。
+- 主机管理的写接口（添加、改名、删除、连接、断开）除了 `proxy.ts` 的全局检查，还在路由里重复 `isApiRequestAllowed` 与 JSON 内容类型检查（`lib/remote/api-guard.ts`）：它们会以用户给的参数启动 `ssh`。添加主机时先把 `user@host -p 2222` 规范成 `-p 2222 user@host` 再校验，主机后面跟命令仍被拒绝。
+
+### 13.3 前端路由与后端范围
+
+- **没有全局「配置后端」**。§6.1 的规则 5 改为显式范围：`<BackendScopeProvider host>` + `useBackendApi()`（`components/remote/BackendScope.tsx`、`lib/remote/scoped-api.ts`）。设置面板、远程目录选择器、定时任务页（固定本机）各自在自己的范围里发请求，`await` 之后也不会变。后台的对话、文件监听、git 轮询始终跟随各自的工作区。统一的普通目录浏览仍是本机。
+- 设置面板按范围重新挂载各分区；当前项目不在所选后端上时，需要项目的分区置灰。范围选择旁的 🌐 按钮打开主机管理（叠在设置之上，Esc 只关它）。
+- `lib/remote/fetch-router.ts`：处理 `fetch(Request)` 的 JSON body（不丢请求元数据）；读 body 期间工作区变化则中止而不是猜；在把响应交给调用方**之前**记下新会话 / 终端的归属，避免紧接着的依赖请求发错机器。带 `sessionId` 的文件请求优先按会话归属路由。
+- 路径归属（`ownerOfPath`）：显式选中的工作区优先于从别的机器学到的更长根路径；路径本身从不决定后端。已移除主机的归属保留，避免误落到本机。远程服务重启后，已知项目根会重新 `cwd/validate`，成功后才算恢复。
+- 路由分类测试检查的是路由族（第一段），不是每个路由和方法。`scheduled-tasks` 整族只走本机。
+
+### 13.4 标识与界面
+
+- 客户端项目标识 `hostedProjectKey(key, host)`：远程为 `r:<编码后的 host>:<key>`，本地不变（已有数据兼容）。只用于客户端：折叠、归档、滚动、草稿、文件标签、终端标签、桌面工作区恢复、通知链接。物理路径和服务端 `projectKey` 保持原样。`SessionInfo.host`、URL `?host=`。
+- `lib/project-group.ts` 按 host + root 分组；主动选过的远程项目（尚无会话）记在 `pi-remote:projects:v1`，与文件访问授权分开存。被移除主机的这类项目不再显示。
+- AppShell 同步记录当前后端；「项目标识补全」的提前返回只对**同一后端**生效，并且后端变化时强制重建输入框会话（上游按 cwd 建立新会话，相同路径不会自己重建）。
+- 离线：除顶部横幅外，工作区探测把代理的 `503 remote_offline` 识别为 `host-offline`，输入框上方显示「主机未连接」并暂停发送（而不是「模型错误 remote_offline」或「文件夹已删除」），按钮是「重新连接」。工作区探测结果按 (后端, 路径) 缓存，项目信任状态随后端刷新。离线期间保留最后已知的运行中会话，避免误报「已完成」通知。
+- 「添加项目」的远程选择器把主机和路径一起交给侧边栏，不从当前工作区推断。桌面通知的正文带主机名。
+- 「另存为」：远程文件经 `/api/r/<host>/files/...?type=download` 取字节，再由本机 `/api/desktop/save` 的原始字节模式写入。
+
+### 13.5 验证
+
+- 单元测试：`lib/remote/*.test.mjs` 101 个（路由、代理策略与 HTTP、SSE 解析、主机状态机生命周期、启动脚本在临时 HOME 下的真实执行、无界面启动器、项目标识、范围 API），全仓库 `npm test` 通过。
+- 界面回归：`e2e/remote-hosts.mjs`，用真实前端 + 全部拦截的 `/api`（不碰 SSH、模型和真实数据）覆盖：本机与两台主机上相同路径的三个项目、来回切换时模型列表跟随后端、设置范围不影响后台请求、主机管理叠在设置之上、远程目录选择器的首次列表就在远程、新选的远程文件夹归入正确主机、离线项目保留并可从输入框重新连接。运行：`E2E_BASE_URL=http://127.0.0.1:<端口> PLAYWRIGHT_CHANNEL=chrome node e2e/remote-hosts.mjs`（`E2E_SCREENSHOTS=<目录>` 可保存截图）。
+- 真实主机（Ubuntu 22.04 x64，Node 22.23.1，经平台 SSH 网关），用打包后的本地服务（`desktop:prepare` 产物，独立的本地 agent 目录）：
+  - 添加主机 → 上传新版本 → 启动 → 隧道 → 登录，约 30 秒；已安装时重连约 5 秒。远程模型列表、会话汇总、地球标志正常。
+  - **断开后任务继续**：在远程项目里让 Agent 用 bash 执行 `sleep 45` 后写文件并回复口令；工具调用开始后立即杀掉本地服务（本机不再有任何隧道）。一分钟后经普通 SSH 检查：文件已写入，会话文件里有最终回复。重新启动本地服务后 5 秒内自动重连，界面显示完整对话。
+  - 上述验证中发现并修复了孤儿服务问题（见 13.1），并清理了实测主机上遗留的 24 个空闲进程。
 
 ## 附录 A：路由分类摘要
 

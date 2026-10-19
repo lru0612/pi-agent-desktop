@@ -193,8 +193,15 @@
     "app/native-theme.css",
     "app/api/updates/",
     "app/api/remote-info/",
+    "app/api/r/",
+    "app/api/remote-hosts/",
     "lib/remote/",
+    "components/remote/",
+    "components/SessionSidebar.hosted.test.mjs",
+    "components/settings-scoping.test.mjs",
+    "e2e/remote-hosts.mjs",
     "docs/remote-hosts-design.zh-CN.md",
+    "docs/remote-hosts.zh-CN.md",
     "components/desktop/",
     "components/ProjectPicker.tsx",
     "components/UpdateReminder.tsx",
@@ -248,6 +255,7 @@
     "2026-09-26 \u2014 app/globals.css and app/settings.css restored to byte-identical with upstream 96966e5: ~470 + ~220 fork lines that had accumulated in them despite the rule moved to a 'fork base layer' at the top of app/native-theme.css (cascade verified unchanged by a computed-style comparison). scripts/upstream-css-baseline.test.mjs now pins both files to hashes in scripts/upstream-css-baseline.json; the sync workflow refreshes them after a merge with `node scripts/upstream-css-baseline.mjs update`, which refuses when either file differs from upstream. Design intent recorded in docs/native-theme.md.",
     "2026-10-04 \u2014 baseline moved 96966e5 -> 6fcd7d4. Segment G (c5a70eb) was a single-parent commit, so git never recorded 6fcd7d4 as merged: merge-base stayed at 96966e5, `npm run drift` reported structural 18077 instead of 9959, and a merge of the upstream tag would have replayed the whole range (39 conflicts in a dry run). An `-s ours` merge now records the ancestry without touching the tree. Risk levels re-measured: lib/file-access.ts low->medium, lib/directory-browser.ts and components/FileExplorer.tsx medium->low; components/FileIcons.tsx no longer differs from upstream and its entry is removed.",
     "2026-10-17 \u2014 components/FileViewer.tsx: removed the dead FileViewerStatus component. No runtime path used it, so the file retains the toolbar while matching the behavior upstream owns.",
-    "2026-10-17 \u2014 lib/i18n/messages/{en,zh-CN,zh-TW}.ts: restored to upstream shape; fork additions, replacements, and deliberate deletions moved to lib/i18n/locale-plugins.ts. Runtime message maps are unchanged, but future upstream locale edits no longer conflict with a rewritten fork pack."
+    "2026-10-17 \u2014 lib/i18n/messages/{en,zh-CN,zh-TW}.ts: restored to upstream shape; fork additions, replacements, and deliberate deletions moved to lib/i18n/locale-plugins.ts. Runtime message maps are unchanged, but future upstream locale edits no longer conflict with a rewritten fork pack.",
+    "2026-10-19 \u2014 SSH remote hosts (lib/remote/, components/remote/, app/api/r/, app/api/remote-hosts/): fork-owned. Upstream files only gain hook points: AppShell/SessionSidebar carry host-qualified project, draft, tab and terminal identity (`r:<host>:<key>`; local keys unchanged); settings widgets fetch through useBackendApi(); ChatInput shows the \"host-offline\" workspace notice; lib/project-group.ts groups by host + root. A clean upstream merge of those files can still drop a host argument silently, so re-run e2e/remote-hosts.mjs after every sync."
   ]
 }
